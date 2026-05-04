@@ -23,10 +23,16 @@ pub fn main() !void {
         if (!renderer.beginFrame(render.Color.white)) continue;
         defer renderer.endFrame();
 
-        renderer.drawTriangle(.{
-            .position = .{ .x = 0.0, .y = 0.0 },
-            .size = .{ .x = 1.2, .y = 1.2 },
+        const screen = renderer.framebufferSize();
+        renderer.drawRectangle(.{
+            .position = .{ .x = 0, .y = 0 },
+            .size = .{ .x = screen.x * 0.5, .y = screen.y * 0.05 },
             .color = render.Color.black,
+        });
+        renderer.drawRectangle(.{
+            .position = .{ .x = screen.x * 0.5, .y = 0 },
+            .size = .{ .x = screen.x * 0.5, .y = screen.y * 0.5 },
+            .color = render.Color.blue,
         });
     }
 }

@@ -13,6 +13,9 @@ pub const Color = struct {
 
     pub const black: Color = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 };
     pub const white: Color = .{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 };
+    pub const red: Color = .{ .r = 1.0, .g = 0.0, .b = 0.0, .a = 1.0 };
+    pub const green: Color = .{ .r = 0.0, .g = 1.0, .b = 0.0, .a = 1.0 };
+    pub const blue: Color = .{ .r = 0.0, .g = 0.0, .b = 1.0, .a = 1.0 };
 
     fn toWgpu(self: Color) wgpu.Color {
         return .{ .r = self.r, .g = self.g, .b = self.b, .a = self.a };
@@ -24,10 +27,10 @@ pub const Vec2 = struct {
     y: f32,
 };
 
-pub const Triangle = struct {
+/// Position and size are framebuffer pixels, measured from the top-left.
+pub const Rectangle = struct {
     position: Vec2,
-    size: Vec2 = .{ .x = 1.0, .y = 1.0 },
-    rotation_radians: f32 = 0.0,
+    size: Vec2,
     color: Color = Color.black,
 };
 
@@ -36,11 +39,15 @@ const Vertex = extern struct {
     color: [4]f32,
 };
 
+const rectangle_vertex_count = 6;
+const max_rectangles_per_frame = 1024;
+
 pub const Renderer = struct {
     allocator: std.mem.Allocator,
     gctx: *zgpu.GraphicsContext,
-    triangle_pipeline: wgpu.RenderPipeline,
-    triangle_vertex_buffer: wgpu.Buffer,
+    rectangle_pipeline: wgpu.RenderPipeline,
+    rectangle_vertex_buffer: wgpu.Buffer,
+    rectangle_count: usize = 0,
     back_buffer_view: ?wgpu.TextureView = null,
     encoder: ?wgpu.CommandEncoder = null,
     pass: ?wgpu.RenderPassEncoder = null,
@@ -63,31 +70,40 @@ pub const Renderer = struct {
         );
         errdefer gctx.destroy(allocator);
 
-        const triangle_pipeline = createTrianglePipeline(gctx);
-        errdefer triangle_pipeline.release();
+        const rectangle_pipeline = createRectanglePipeline(gctx);
+        errdefer rectangle_pipeline.release();
 
-        const triangle_vertex_buffer = gctx.device.createBuffer(.{
+        const rectangle_vertex_buffer = gctx.device.createBuffer(.{
             .usage = .{ .vertex = true, .copy_dst = true },
-            .size = @sizeOf(Vertex) * 3,
+            .size = @sizeOf(Vertex) * rectangle_vertex_count * max_rectangles_per_frame,
         });
-        errdefer triangle_vertex_buffer.release();
+        errdefer rectangle_vertex_buffer.release();
 
         return .{
             .allocator = allocator,
             .gctx = gctx,
-            .triangle_pipeline = triangle_pipeline,
-            .triangle_vertex_buffer = triangle_vertex_buffer,
+            .rectangle_pipeline = rectangle_pipeline,
+            .rectangle_vertex_buffer = rectangle_vertex_buffer,
         };
     }
 
     pub fn deinit(self: *Renderer) void {
-        self.triangle_vertex_buffer.release();
-        self.triangle_pipeline.release();
+        self.rectangle_vertex_buffer.release();
+        self.rectangle_pipeline.release();
         self.gctx.destroy(self.allocator);
+    }
+
+    pub fn framebufferSize(self: *Renderer) Vec2 {
+        return .{
+            .x = @floatFromInt(self.gctx.swapchain_descriptor.width),
+            .y = @floatFromInt(self.gctx.swapchain_descriptor.height),
+        };
     }
 
     pub fn beginFrame(self: *Renderer, clear_color: Color) bool {
         if (!self.gctx.canRender()) return false;
+
+        self.rectangle_count = 0;
 
         const back_buffer_view = self.gctx.swapchain.getCurrentTextureView();
         const encoder = self.gctx.device.createCommandEncoder(null);
@@ -123,23 +139,29 @@ pub const Renderer = struct {
         self.back_buffer_view = null;
     }
 
-    pub fn drawTriangle(self: *Renderer, triangle: Triangle) void {
-        const vertices = triangleVertices(triangle);
+    pub fn drawRectangle(self: *Renderer, rectangle: Rectangle) void {
+        std.debug.assert(self.rectangle_count < max_rectangles_per_frame);
 
-        self.gctx.queue.writeBuffer(self.triangle_vertex_buffer, 0, Vertex, &vertices);
+        const vertices = rectangleVertices(rectangle, self.framebufferSize());
+        const vertex_offset = self.rectangle_count * rectangle_vertex_count;
+        const byte_offset = vertex_offset * @sizeOf(Vertex);
+
+        self.gctx.queue.writeBuffer(self.rectangle_vertex_buffer, byte_offset, Vertex, &vertices);
 
         const pass = self.pass.?;
-        pass.setPipeline(self.triangle_pipeline);
-        pass.setVertexBuffer(0, self.triangle_vertex_buffer, 0, @sizeOf(Vertex) * vertices.len);
-        pass.draw(3, 1, 0, 0);
+        pass.setPipeline(self.rectangle_pipeline);
+        pass.setVertexBuffer(0, self.rectangle_vertex_buffer, @intCast(byte_offset), @sizeOf(Vertex) * vertices.len);
+        pass.draw(rectangle_vertex_count, 1, 0, 0);
+
+        self.rectangle_count += 1;
     }
 };
 
-fn createTrianglePipeline(gctx: *zgpu.GraphicsContext) wgpu.RenderPipeline {
+fn createRectanglePipeline(gctx: *zgpu.GraphicsContext) wgpu.RenderPipeline {
     const shader_module = zgpu.createWgslShaderModule(
         gctx.device,
-        @embedFile("triangle.wgsl"),
-        "triangle",
+        @embedFile("rectangle.wgsl"),
+        "rectangle",
     );
     defer shader_module.release();
 
@@ -169,37 +191,38 @@ fn createTrianglePipeline(gctx: *zgpu.GraphicsContext) wgpu.RenderPipeline {
     });
 }
 
-fn triangleVertices(triangle: Triangle) [3]Vertex {
-    const local_positions = [_]Vec2{
-        .{ .x = 0.0, .y = 0.5 },
-        .{ .x = -0.5, .y = -0.5 },
-        .{ .x = 0.5, .y = -0.5 },
+fn rectangleVertices(rectangle: Rectangle, framebuffer_size: Vec2) [rectangle_vertex_count]Vertex {
+    const left = rectangle.position.x;
+    const top = rectangle.position.y;
+    const right = rectangle.position.x + rectangle.size.x;
+    const bottom = rectangle.position.y + rectangle.size.y;
+
+    const positions = [_]Vec2{
+        .{ .x = left, .y = top },
+        .{ .x = left, .y = bottom },
+        .{ .x = right, .y = top },
+        .{ .x = right, .y = top },
+        .{ .x = left, .y = bottom },
+        .{ .x = right, .y = bottom },
     };
 
     const color = [_]f32{
-        @floatCast(triangle.color.r),
-        @floatCast(triangle.color.g),
-        @floatCast(triangle.color.b),
-        @floatCast(triangle.color.a),
+        @floatCast(rectangle.color.r),
+        @floatCast(rectangle.color.g),
+        @floatCast(rectangle.color.b),
+        @floatCast(rectangle.color.a),
     };
 
-    var vertices: [3]Vertex = undefined;
-    for (&vertices, local_positions) |*vertex, position| {
-        vertex.* = .{ .position = transformPoint(position, triangle), .color = color };
+    var vertices: [rectangle_vertex_count]Vertex = undefined;
+    for (&vertices, positions) |*vertex, position| {
+        vertex.* = .{ .position = screenToClip(position, framebuffer_size), .color = color };
     }
     return vertices;
 }
 
-fn transformPoint(point: Vec2, triangle: Triangle) [2]f32 {
-    const scaled = Vec2{
-        .x = point.x * triangle.size.x,
-        .y = point.y * triangle.size.y,
-    };
-    const rotation_sin = @sin(triangle.rotation_radians);
-    const rotation_cos = @cos(triangle.rotation_radians);
-
+fn screenToClip(position: Vec2, framebuffer_size: Vec2) [2]f32 {
     return .{
-        scaled.x * rotation_cos - scaled.y * rotation_sin + triangle.position.x,
-        scaled.x * rotation_sin + scaled.y * rotation_cos + triangle.position.y,
+        position.x / framebuffer_size.x * 2.0 - 1.0,
+        1.0 - position.y / framebuffer_size.y * 2.0,
     };
 }
