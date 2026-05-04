@@ -8,7 +8,7 @@ pub fn main() !void {
     defer window.destroy();
 
     glfw.makeContextCurrent(window);
-    glfw.swapInterval(1);
+    glfw.swapInterval(0);
 
     while (!window.shouldClose()) {
         glfw.pollEvents();
