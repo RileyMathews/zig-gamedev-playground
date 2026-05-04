@@ -34,5 +34,11 @@ pub fn main() !void {
             .size = .{ .x = screen.x * 0.5, .y = screen.y * 0.5 },
             .color = render.Color.blue,
         });
+        renderer.drawText(.{
+            .text = "MSDF text rendering",
+            .position = .{ .x = 24, .y = 24 },
+            .size = 32,
+            .color = render.Color.red,
+        });
     }
 }
