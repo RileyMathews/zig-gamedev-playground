@@ -24,12 +24,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-
     exe.root_module.addImport("zglfw", zglfw.module("root"));
+    exe.root_module.linkLibrary(zglfw.artifact("glfw"));
 
-    if (target.result.os.tag != .emscripten) {
-        exe.root_module.linkLibrary(zglfw.artifact("glfw"));
-    }
+    const zopengl = b.dependency("zopengl", .{});
+    exe.root_module.addImport("zopengl", zopengl.module("root"));
 
     b.installArtifact(exe);
 
