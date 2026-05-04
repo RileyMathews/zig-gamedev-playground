@@ -36,6 +36,15 @@
             .url = "https://github.com/zig-gamedev/zglfw/archive/51003c105d23db378bb59ce415a387b22f1b0892.tar.gz",
             .hash = "zglfw-0.10.0-dev-zgVDNIy4IQDJNRy4jrP1As-SZxfJpuWhU1iJ-wBab_VD",
         },
+        .zgpu = .{
+            .url = "git+https://github.com/zig-gamedev/zgpu.git#c512b60c1f0cd438dcc6297083d0e3d91ad5e717",
+            .hash = "zgpu-0.12.0-dev-nqFT5OOmCABcwCeEje63Wohd7SqQ73CbPqZzmuqArpgF",
+        },
+        .dawn_x86_64_linux_gnu = .{
+            .url = "https://github.com/michal-z/webgpu_dawn-x86_64-linux-gnu/archive/7d70db023bf254546024629cbec5ee6113e12a42.tar.gz",
+            .hash = "N-V-__8AAK7XUQNKNRnv1J6i189jtURJKjp3HTftoyD4Y4CB",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

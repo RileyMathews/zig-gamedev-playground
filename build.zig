@@ -12,6 +12,24 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+
+    const zglfw = b.dependency("zglfw", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("zglfw", zglfw.module("root"));
+    if (target.result.os.tag != .emscripten) {
+        exe.linkLibrary(zglfw.artifact("glfw"));
+    }
+
+    const zgpu = b.dependency("zgpu", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("zgpu", zgpu.module("root"));
+    @import("zgpu").addLibraryPathsTo(exe);
+    exe.linkLibrary(zgpu.artifact("zdawn"));
+
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run the default executable");
@@ -22,4 +40,3 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 }
-
