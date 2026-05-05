@@ -17,28 +17,31 @@ pub fn main() !void {
     var renderer = try Renderer.init(allocator, window);
     defer renderer.deinit();
 
+    var glyph_demo_buffer: [512]u8 = undefined;
+    const glyph_demo_text = buildGlyphDemoText(glyph_demo_buffer[0..]);
+
     while (!window.shouldClose()) {
         zglfw.pollEvents();
 
         if (!renderer.beginFrame(render.Color.white)) continue;
         defer renderer.endFrame();
 
-        const screen = renderer.framebufferSize();
-        renderer.drawRectangle(.{
+        renderer.drawText(.{
+            .text = glyph_demo_text,
             .position = .{ .x = 0, .y = 0 },
-            .size = .{ .x = screen.x * 0.5, .y = screen.y * 0.05 },
+            .size = 24,
             .color = render.Color.black,
         });
-        renderer.drawRectangle(.{
-            .position = .{ .x = screen.x * 0.5, .y = 0 },
-            .size = .{ .x = screen.x * 0.5, .y = screen.y * 0.5 },
-            .color = render.Color.blue,
-        });
-        renderer.drawText(.{
-            .text = "Testing",
-            .position = .{ .x = 0, .y = 0 },
-            .size = 800,
-            .color = render.Color.red,
-        });
     }
+}
+
+fn buildGlyphDemoText(buffer: []u8) []const u8 {
+    var len: usize = 0;
+
+    for (32..256) |value| {
+        const codepoint: u21 = @intCast(value);
+        len += std.unicode.utf8Encode(codepoint, buffer[len..]) catch unreachable;
+    }
+
+    return buffer[0..len];
 }
