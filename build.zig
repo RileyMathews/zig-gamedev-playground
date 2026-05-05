@@ -35,13 +35,6 @@ pub fn build(b: *std.Build) void {
     @import("zgpu").addLibraryPathsTo(exe);
     exe.linkLibrary(zgpu.artifact("zdawn"));
 
-    exe.root_module.addAnonymousImport("ui_font_json", .{
-        .root_source_file = b.path("assets/fonts/generated/ui.json"),
-    });
-    exe.root_module.addAnonymousImport("ui_font_bin", .{
-        .root_source_file = b.path("assets/fonts/generated/ui.bin"),
-    });
-
     if (target.result.os.tag == .linux) {
         const system_sdk = b.dependency("system_sdk", .{});
         exe.addLibraryPath(system_sdk.path("linux/lib/x86_64-linux-gnu"));

@@ -5,9 +5,6 @@ const zgpu = @import("zgpu");
 
 const wgpu = zgpu.wgpu;
 
-const ui_font_json = @embedFile("ui_font_json");
-const ui_font_bin = @embedFile("ui_font_bin");
-
 pub const Color = struct {
     r: f64,
     g: f64,
@@ -68,10 +65,8 @@ pub const Renderer = struct {
     gctx: *zgpu.GraphicsContext,
     rectangle_pipeline: wgpu.RenderPipeline,
     bitmap_text_pipeline: wgpu.RenderPipeline,
-    text_pipeline: wgpu.RenderPipeline,
     text_bind_group_layout: wgpu.BindGroupLayout,
     bitmap_text_bind_group: wgpu.BindGroup,
-    text_bind_group: wgpu.BindGroup,
     rectangle_vertex_buffer: wgpu.Buffer,
     text_vertex_buffer: wgpu.Buffer,
     text_vertices: []TextVertex,
@@ -79,10 +74,6 @@ pub const Renderer = struct {
     bitmap_font_texture: wgpu.Texture,
     bitmap_font_texture_view: wgpu.TextureView,
     bitmap_font_sampler: wgpu.Sampler,
-    font_atlas: FontAtlas,
-    font_texture: wgpu.Texture,
-    font_texture_view: wgpu.TextureView,
-    font_sampler: wgpu.Sampler,
     rectangle_count: usize = 0,
     text_vertex_count: usize = 0,
     back_buffer_view: ?wgpu.TextureView = null,
@@ -110,12 +101,6 @@ pub const Renderer = struct {
         const rectangle_pipeline = createRectanglePipeline(gctx);
         errdefer rectangle_pipeline.release();
 
-        var font_atlas = try FontAtlas.init(allocator);
-        errdefer font_atlas.deinit();
-
-        var font_texture_resources = try createFontTextureResources(allocator, gctx, &font_atlas);
-        errdefer font_texture_resources.deinit();
-
         const bitmap_font = BitmapFont.init();
 
         var bitmap_font_texture_resources = try createBitmapFontTextureResources(allocator, gctx);
@@ -124,17 +109,11 @@ pub const Renderer = struct {
         const text_bind_group_layout = createTextBindGroupLayout(gctx);
         errdefer text_bind_group_layout.release();
 
-        const text_bind_group = createTextBindGroup(gctx, text_bind_group_layout, font_texture_resources.view, font_texture_resources.sampler);
-        errdefer text_bind_group.release();
-
         const bitmap_text_bind_group = createTextBindGroup(gctx, text_bind_group_layout, bitmap_font_texture_resources.view, bitmap_font_texture_resources.sampler);
         errdefer bitmap_text_bind_group.release();
 
         const bitmap_text_pipeline = createBitmapTextPipeline(gctx, text_bind_group_layout);
         errdefer bitmap_text_pipeline.release();
-
-        const text_pipeline = createTextPipeline(gctx, text_bind_group_layout);
-        errdefer text_pipeline.release();
 
         const rectangle_vertex_buffer = gctx.device.createBuffer(.{
             .usage = .{ .vertex = true, .copy_dst = true },
@@ -156,10 +135,8 @@ pub const Renderer = struct {
             .gctx = gctx,
             .rectangle_pipeline = rectangle_pipeline,
             .bitmap_text_pipeline = bitmap_text_pipeline,
-            .text_pipeline = text_pipeline,
             .text_bind_group_layout = text_bind_group_layout,
             .bitmap_text_bind_group = bitmap_text_bind_group,
-            .text_bind_group = text_bind_group,
             .rectangle_vertex_buffer = rectangle_vertex_buffer,
             .text_vertex_buffer = text_vertex_buffer,
             .text_vertices = text_vertices,
@@ -167,27 +144,17 @@ pub const Renderer = struct {
             .bitmap_font_texture = bitmap_font_texture_resources.texture,
             .bitmap_font_texture_view = bitmap_font_texture_resources.view,
             .bitmap_font_sampler = bitmap_font_texture_resources.sampler,
-            .font_atlas = font_atlas,
-            .font_texture = font_texture_resources.texture,
-            .font_texture_view = font_texture_resources.view,
-            .font_sampler = font_texture_resources.sampler,
         };
     }
 
     pub fn deinit(self: *Renderer) void {
         self.allocator.free(self.text_vertices);
-        self.text_bind_group.release();
         self.bitmap_text_bind_group.release();
         self.bitmap_font_sampler.release();
         self.bitmap_font_texture_view.release();
         self.bitmap_font_texture.release();
-        self.font_sampler.release();
-        self.font_texture_view.release();
-        self.font_texture.release();
-        self.font_atlas.deinit();
         self.text_vertex_buffer.release();
         self.rectangle_vertex_buffer.release();
-        self.text_pipeline.release();
         self.bitmap_text_pipeline.release();
         self.text_bind_group_layout.release();
         self.rectangle_pipeline.release();
@@ -306,61 +273,6 @@ pub const Renderer = struct {
         self.drawTextVertices(start_vertex, self.bitmap_text_pipeline, self.bitmap_text_bind_group);
     }
 
-    pub fn drawTextEx(self: *Renderer, text: Text) void {
-        const view = std.unicode.Utf8View.init(text.text) catch return;
-        const start_vertex = self.text_vertex_count;
-        const framebuffer_size = self.framebufferSize();
-        const color = colorComponents(text.color);
-        const scale_factor = text.size / self.font_atlas.base_size;
-
-        var iterator = view.iterator();
-        var text_offset_x: f32 = 0.0;
-        var text_offset_y: f32 = 0.0;
-
-        while (iterator.nextCodepoint()) |codepoint| {
-            if (codepoint == '\n') {
-                text_offset_y += text.size + text_line_spacing;
-                text_offset_x = 0.0;
-                continue;
-            }
-
-            const glyph = self.font_atlas.glyph(codepoint) orelse self.font_atlas.glyph('?') orelse continue;
-
-            if ((codepoint != ' ') and (codepoint != '\t')) {
-                if (glyph.atlas_bounds) |atlas_bounds| {
-                    if ((glyph.width > 0.0) and (glyph.height > 0.0)) {
-                        std.debug.assert(self.text_vertex_count + text_vertex_count_per_glyph <= max_text_vertices_per_frame);
-                        appendGlyphVertices(
-                            self.text_vertices[self.text_vertex_count..][0..text_vertex_count_per_glyph],
-                            .{
-                                .x = text.position.x + text_offset_x + glyph.offset_x * scale_factor,
-                                .y = text.position.y + text_offset_y + glyph.offset_y * scale_factor,
-                            },
-                            .{
-                                .x = glyph.width * scale_factor,
-                                .y = glyph.height * scale_factor,
-                            },
-                            atlas_bounds,
-                            self.font_atlas.width,
-                            self.font_atlas.height,
-                            framebuffer_size,
-                            color,
-                        );
-                        self.text_vertex_count += text_vertex_count_per_glyph;
-                    }
-                }
-            }
-
-            if (glyph.advance_x == 0.0) {
-                text_offset_x += glyph.width * scale_factor;
-            } else {
-                text_offset_x += glyph.advance_x * scale_factor;
-            }
-        }
-
-        self.drawTextVertices(start_vertex, self.text_pipeline, self.text_bind_group);
-    }
-
     fn drawTextVertices(self: *Renderer, start_vertex: usize, pipeline: wgpu.RenderPipeline, bind_group: wgpu.BindGroup) void {
         const vertex_count = self.text_vertex_count - start_vertex;
         if (vertex_count == 0) return;
@@ -387,15 +299,6 @@ const Bounds = struct {
     top: f32,
     right: f32,
     bottom: f32,
-};
-
-const Glyph = struct {
-    offset_x: f32,
-    offset_y: f32,
-    advance_x: f32,
-    width: f32,
-    height: f32,
-    atlas_bounds: ?Bounds,
 };
 
 const default_font_texture_width = 128;
@@ -520,96 +423,6 @@ const BitmapFont = struct {
     }
 };
 
-const FontAtlas = struct {
-    glyphs: std.AutoHashMap(u21, Glyph),
-    width: f32,
-    height: f32,
-    base_size: f32,
-
-    fn init(allocator: std.mem.Allocator) !FontAtlas {
-        const parsed = try std.json.parseFromSlice(FontJson, allocator, ui_font_json, .{ .ignore_unknown_fields = true });
-        defer parsed.deinit();
-
-        var glyphs = std.AutoHashMap(u21, Glyph).init(allocator);
-        errdefer glyphs.deinit();
-
-        for (parsed.value.glyphs) |json_glyph| {
-            const unicode = json_glyph.unicode orelse continue;
-            const plane_bounds = if (json_glyph.planeBounds) |bounds| bounds.toBounds() else null;
-            const atlas_bounds = if (json_glyph.atlasBounds) |bounds| bounds.toBounds() else null;
-
-            var loaded_glyph = Glyph{
-                .offset_x = 0.0,
-                .offset_y = 0.0,
-                .advance_x = json_glyph.advance * parsed.value.atlas.size,
-                .width = 0.0,
-                .height = 0.0,
-                .atlas_bounds = atlas_bounds,
-            };
-
-            if (plane_bounds) |bounds| {
-                loaded_glyph.offset_x = bounds.left * parsed.value.atlas.size;
-                loaded_glyph.offset_y = (bounds.top - parsed.value.metrics.ascender) * parsed.value.atlas.size;
-                loaded_glyph.width = (bounds.right - bounds.left) * parsed.value.atlas.size;
-                loaded_glyph.height = (bounds.bottom - bounds.top) * parsed.value.atlas.size;
-            }
-
-            try glyphs.put(@intCast(unicode), loaded_glyph);
-        }
-
-        return .{
-            .glyphs = glyphs,
-            .width = parsed.value.atlas.width,
-            .height = parsed.value.atlas.height,
-            .base_size = (parsed.value.metrics.descender - parsed.value.metrics.ascender) * parsed.value.atlas.size,
-        };
-    }
-
-    fn deinit(self: *FontAtlas) void {
-        self.glyphs.deinit();
-    }
-
-    fn glyph(self: *const FontAtlas, codepoint: u21) ?Glyph {
-        return self.glyphs.get(codepoint);
-    }
-};
-
-const FontJson = struct {
-    atlas: struct {
-        width: f32,
-        height: f32,
-        size: f32,
-    },
-    metrics: struct {
-        ascender: f32,
-        descender: f32,
-    },
-    glyphs: []const GlyphJson,
-};
-
-const GlyphJson = struct {
-    unicode: ?u32 = null,
-    advance: f32,
-    planeBounds: ?BoundsJson = null,
-    atlasBounds: ?BoundsJson = null,
-};
-
-const BoundsJson = struct {
-    left: f32,
-    top: f32,
-    right: f32,
-    bottom: f32,
-
-    fn toBounds(self: BoundsJson) Bounds {
-        return .{
-            .left = self.left,
-            .top = self.top,
-            .right = self.right,
-            .bottom = self.bottom,
-        };
-    }
-};
-
 const FontTextureResources = struct {
     texture: wgpu.Texture,
     view: wgpu.TextureView,
@@ -681,59 +494,6 @@ fn createBitmapFontTextureResources(allocator: std.mem.Allocator, gctx: *zgpu.Gr
     };
 }
 
-fn createFontTextureResources(allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext, font_atlas: *const FontAtlas) !FontTextureResources {
-    const width: u32 = @intFromFloat(font_atlas.width);
-    const height: u32 = @intFromFloat(font_atlas.height);
-    const pixel_count: usize = @as(usize, width) * @as(usize, height);
-    std.debug.assert(ui_font_bin.len == pixel_count * 3);
-
-    const rgba_pixels = try allocator.alloc(u8, pixel_count * 4);
-    defer allocator.free(rgba_pixels);
-    for (0..pixel_count) |pixel_index| {
-        rgba_pixels[pixel_index * 4 + 0] = ui_font_bin[pixel_index * 3 + 0];
-        rgba_pixels[pixel_index * 4 + 1] = ui_font_bin[pixel_index * 3 + 1];
-        rgba_pixels[pixel_index * 4 + 2] = ui_font_bin[pixel_index * 3 + 2];
-        rgba_pixels[pixel_index * 4 + 3] = 255;
-    }
-
-    const texture = gctx.device.createTexture(.{
-        .usage = .{ .texture_binding = true, .copy_dst = true },
-        .size = .{
-            .width = width,
-            .height = height,
-            .depth_or_array_layers = 1,
-        },
-        .format = .rgba8_unorm,
-    });
-    errdefer texture.release();
-
-    gctx.queue.writeTexture(
-        .{ .texture = texture },
-        .{
-            .bytes_per_row = width * 4,
-            .rows_per_image = height,
-        },
-        .{ .width = width, .height = height },
-        u8,
-        rgba_pixels,
-    );
-
-    const view = texture.createView(.{});
-    errdefer view.release();
-
-    const sampler = gctx.device.createSampler(.{
-        .mag_filter = .linear,
-        .min_filter = .linear,
-    });
-    errdefer sampler.release();
-
-    return .{
-        .texture = texture,
-        .view = view,
-        .sampler = sampler,
-    };
-}
-
 fn createTextBindGroupLayout(gctx: *zgpu.GraphicsContext) wgpu.BindGroupLayout {
     const entries = [_]wgpu.BindGroupLayoutEntry{
         zgpu.textureEntry(0, .{ .fragment = true }, .float, .tvdim_2d, false),
@@ -761,64 +521,6 @@ fn createTextBindGroup(
         .layout = layout,
         .entry_count = entries.len,
         .entries = &entries,
-    });
-}
-
-fn createTextPipeline(gctx: *zgpu.GraphicsContext, bind_group_layout: wgpu.BindGroupLayout) wgpu.RenderPipeline {
-    const shader_module = zgpu.createWgslShaderModule(
-        gctx.device,
-        @embedFile("text_msdf.wgsl"),
-        "text-msdf",
-    );
-    defer shader_module.release();
-
-    const bind_group_layouts = [_]wgpu.BindGroupLayout{bind_group_layout};
-    const pipeline_layout = gctx.device.createPipelineLayout(.{
-        .bind_group_layout_count = bind_group_layouts.len,
-        .bind_group_layouts = &bind_group_layouts,
-    });
-    defer pipeline_layout.release();
-
-    const vertex_attributes = [_]wgpu.VertexAttribute{
-        .{ .format = .float32x2, .offset = @offsetOf(TextVertex, "position"), .shader_location = 0 },
-        .{ .format = .float32x2, .offset = @offsetOf(TextVertex, "uv"), .shader_location = 1 },
-        .{ .format = .float32x4, .offset = @offsetOf(TextVertex, "color"), .shader_location = 2 },
-    };
-    const vertex_buffers = [_]wgpu.VertexBufferLayout{.{
-        .array_stride = @sizeOf(TextVertex),
-        .attribute_count = vertex_attributes.len,
-        .attributes = &vertex_attributes,
-    }};
-
-    const blend = wgpu.BlendState{
-        .color = .{
-            .src_factor = .src_alpha,
-            .dst_factor = .one_minus_src_alpha,
-        },
-        .alpha = .{
-            .src_factor = .one,
-            .dst_factor = .one_minus_src_alpha,
-        },
-    };
-    const color_targets = [_]wgpu.ColorTargetState{.{
-        .format = zgpu.GraphicsContext.swapchain_format,
-        .blend = &blend,
-    }};
-
-    return gctx.device.createRenderPipeline(.{
-        .layout = pipeline_layout,
-        .vertex = .{
-            .module = shader_module,
-            .entry_point = "vs_main",
-            .buffer_count = vertex_buffers.len,
-            .buffers = &vertex_buffers,
-        },
-        .fragment = &.{
-            .module = shader_module,
-            .entry_point = "fs_main",
-            .target_count = color_targets.len,
-            .targets = &color_targets,
-        },
     });
 }
 
