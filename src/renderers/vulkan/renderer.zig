@@ -131,8 +131,8 @@ pub const VulkanRenderer = struct {
     text_descriptor_pool: vk.DescriptorPool = .null_handle,
     text_descriptor_set: vk.DescriptorSet = .null_handle,
 
-    rectangle_instance_buffer: BufferResource = .{},
-    text_instance_buffer: BufferResource = .{},
+    rectangle_instance_buffers: [max_frames_in_flight]BufferResource = [_]BufferResource{.{}} ** max_frames_in_flight,
+    text_instance_buffers: [max_frames_in_flight]BufferResource = [_]BufferResource{.{}} ** max_frames_in_flight,
     bitmap_font: BitmapFont = undefined,
     bitmap_font_texture: FontTextureResources = .{},
 
@@ -197,18 +197,22 @@ pub const VulkanRenderer = struct {
         self.text_pipeline = try self.createTextPipeline();
         self.text_descriptor_pool = try self.createTextDescriptorPool();
 
-        self.rectangle_instance_buffer = try self.createBuffer(
-            @sizeOf(RectangleInstance) * max_rectangles_per_frame,
-            .{ .vertex_buffer_bit = true },
-            .{ .host_visible_bit = true, .host_coherent_bit = true },
-            true,
-        );
-        self.text_instance_buffer = try self.createBuffer(
-            @sizeOf(GlyphInstance) * max_text_glyphs_per_frame,
-            .{ .vertex_buffer_bit = true },
-            .{ .host_visible_bit = true, .host_coherent_bit = true },
-            true,
-        );
+        for (&self.rectangle_instance_buffers) |*buffer| {
+            buffer.* = try self.createBuffer(
+                @sizeOf(RectangleInstance) * max_rectangles_per_frame,
+                .{ .vertex_buffer_bit = true },
+                .{ .host_visible_bit = true, .host_coherent_bit = true },
+                true,
+            );
+        }
+        for (&self.text_instance_buffers) |*buffer| {
+            buffer.* = try self.createBuffer(
+                @sizeOf(GlyphInstance) * max_text_glyphs_per_frame,
+                .{ .vertex_buffer_bit = true },
+                .{ .host_visible_bit = true, .host_coherent_bit = true },
+                true,
+            );
+        }
         self.bitmap_font = BitmapFont.init();
         self.bitmap_font_texture = try self.createBitmapFontTextureResources();
         self.text_descriptor_set = try self.createTextDescriptorSet();
@@ -222,8 +226,8 @@ pub const VulkanRenderer = struct {
         }
 
         self.bitmap_font_texture.deinit(self);
-        self.text_instance_buffer.deinit(self);
-        self.rectangle_instance_buffer.deinit(self);
+        for (&self.text_instance_buffers) |*buffer| buffer.deinit(self);
+        for (&self.rectangle_instance_buffers) |*buffer| buffer.deinit(self);
 
         if (self.text_descriptor_pool != .null_handle) self.dev.destroyDescriptorPool(self.text_descriptor_pool, null);
         if (self.text_pipeline != .null_handle) self.dev.destroyPipeline(self.text_pipeline, null);
@@ -468,13 +472,14 @@ pub const VulkanRenderer = struct {
         std.debug.assert(self.rectangle_count < max_rectangles_per_frame);
 
         const byte_offset = self.rectangle_count * @sizeOf(RectangleInstance);
-        const mapped_instances: [*]RectangleInstance = @ptrCast(@alignCast(self.rectangle_instance_buffer.mapped.?));
+        const instance_buffer = &self.rectangle_instance_buffers[self.current_frame];
+        const mapped_instances: [*]RectangleInstance = @ptrCast(@alignCast(instance_buffer.mapped.?));
         mapped_instances[self.rectangle_count] = rectangleInstance(rectangle);
 
         const command_buffer = self.currentRenderPass();
         self.dev.cmdBindPipeline(command_buffer, .graphics, self.rectangle_pipeline);
         const offset = [_]vk.DeviceSize{@intCast(byte_offset)};
-        self.dev.cmdBindVertexBuffers(command_buffer, 0, 1, @ptrCast(&self.rectangle_instance_buffer.buffer), &offset);
+        self.dev.cmdBindVertexBuffers(command_buffer, 0, 1, @ptrCast(&instance_buffer.buffer), &offset);
         self.dev.cmdDraw(command_buffer, quad_vertex_count, 1, 0, 0);
 
         self.rectangle_count += 1;
@@ -483,7 +488,8 @@ pub const VulkanRenderer = struct {
     pub fn drawText(self: *VulkanRenderer, text: Text) void {
         const view = std.unicode.Utf8View.init(text.text) catch return;
         const start_instance = self.text_instance_count;
-        const mapped_instances: [*]GlyphInstance = @ptrCast(@alignCast(self.text_instance_buffer.mapped.?));
+        const instance_buffer = &self.text_instance_buffers[self.current_frame];
+        const mapped_instances: [*]GlyphInstance = @ptrCast(@alignCast(instance_buffer.mapped.?));
         const color = colorComponents(text.color);
         const scale_factor = text.size / self.bitmap_font.base_size;
         const spacing = @trunc(scale_factor);
@@ -545,7 +551,8 @@ pub const VulkanRenderer = struct {
             null,
         );
         const offset = [_]vk.DeviceSize{@intCast(byte_offset)};
-        self.dev.cmdBindVertexBuffers(command_buffer, 0, 1, @ptrCast(&self.text_instance_buffer.buffer), &offset);
+        const instance_buffer = &self.text_instance_buffers[self.current_frame];
+        self.dev.cmdBindVertexBuffers(command_buffer, 0, 1, @ptrCast(&instance_buffer.buffer), &offset);
         self.dev.cmdDraw(command_buffer, quad_vertex_count, @intCast(instance_count), 0, 0);
     }
 
