@@ -2,8 +2,8 @@ const std = @import("std");
 const zglfw = @import("zglfw");
 
 const debug_ui = @import("debug_ui.zig");
-const render = @import("renderers/zgpu/renderer.zig");
-const ZgpuRenderer = render.ZgpuRenderer;
+const render = @import("renderer");
+const Renderer = render.Renderer;
 
 pub fn main() !void {
     try zglfw.init();
@@ -15,11 +15,11 @@ pub fn main() !void {
     defer window.destroy();
 
     const allocator = std.heap.page_allocator;
-    var renderer = try ZgpuRenderer.init(allocator, window);
+    var renderer = try Renderer.init(allocator, window);
     defer renderer.deinit();
 
-    var debug_ui_state = debug_ui.DebugUi.init(allocator, window, renderer.graphicsContext());
-    defer debug_ui_state.deinit();
+    var debug_ui_state = try debug_ui.DebugUi.init(allocator, window, &renderer);
+    defer debug_ui_state.deinit(&renderer);
 
     var glyph_demo_buffer: [512]u8 = undefined;
     const glyph_demo_text = buildGlyphDemoText(glyph_demo_buffer[0..]);
@@ -43,14 +43,7 @@ pub fn main() !void {
             .color = render.Color.blue,
         });
 
-        const framebuffer_size = renderer.framebufferPixelSize();
-        const gctx = renderer.graphicsContext();
-        debug_ui_state.draw(renderer.currentRenderPass(), .{
-            .fps = gctx.stats.fps,
-            .average_cpu_time_ms = gctx.stats.average_cpu_time,
-            .screen_width = framebuffer_size.width,
-            .screen_height = framebuffer_size.height,
-        });
+        debug_ui_state.draw(&renderer, renderer.framebufferPixelSize());
     }
 }
 

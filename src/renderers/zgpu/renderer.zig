@@ -2,10 +2,13 @@ const std = @import("std");
 
 const zglfw = @import("zglfw");
 const zgpu = @import("zgpu");
+const zgui = @import("zgui");
 
 const wgpu = zgpu.wgpu;
 
 const monogram_font = @import("monogram_font.zig");
+
+pub const Renderer = ZgpuRenderer;
 
 pub const Color = struct {
     r: f64,
@@ -49,40 +52,49 @@ pub const Text = struct {
     color: Color = Color.black,
 };
 
-const Vertex = extern struct {
+const FrameUniforms = extern struct {
+    framebuffer_size: [2]f32,
+    padding: [2]f32 = .{ 0.0, 0.0 },
+};
+
+const RectangleInstance = extern struct {
     position: [2]f32,
+    size: [2]f32,
     color: [4]f32,
 };
 
-const TextVertex = extern struct {
+const GlyphInstance = extern struct {
     position: [2]f32,
-    uv: [2]f32,
+    size: [2]f32,
+    uv_min: [2]f32,
+    uv_max: [2]f32,
     color: [4]f32,
 };
 
-const rectangle_vertex_count = 6;
+const quad_vertex_count = 6;
 const max_rectangles_per_frame = 1024;
-const text_vertex_count_per_glyph = 6;
 const max_text_glyphs_per_frame = 4096;
-const max_text_vertices_per_frame = text_vertex_count_per_glyph * max_text_glyphs_per_frame;
 const text_line_spacing: f32 = 2.0;
 
 pub const ZgpuRenderer = struct {
     allocator: std.mem.Allocator,
     gctx: *zgpu.GraphicsContext,
+    frame_bind_group_layout: wgpu.BindGroupLayout,
+    frame_bind_group: wgpu.BindGroup,
+    frame_uniform_buffer: wgpu.Buffer,
     rectangle_pipeline: wgpu.RenderPipeline,
     bitmap_text_pipeline: wgpu.RenderPipeline,
     text_bind_group_layout: wgpu.BindGroupLayout,
     bitmap_text_bind_group: wgpu.BindGroup,
-    rectangle_vertex_buffer: wgpu.Buffer,
-    text_vertex_buffer: wgpu.Buffer,
-    text_vertices: []TextVertex,
+    rectangle_instance_buffer: wgpu.Buffer,
+    text_instance_buffer: wgpu.Buffer,
+    text_instances: []GlyphInstance,
     bitmap_font: BitmapFont,
     bitmap_font_texture: wgpu.Texture,
     bitmap_font_texture_view: wgpu.TextureView,
     bitmap_font_sampler: wgpu.Sampler,
     rectangle_count: usize = 0,
-    text_vertex_count: usize = 0,
+    text_instance_count: usize = 0,
     back_buffer_view: ?wgpu.TextureView = null,
     encoder: ?wgpu.CommandEncoder = null,
     pass: ?wgpu.RenderPassEncoder = null,
@@ -101,54 +113,67 @@ pub const ZgpuRenderer = struct {
                 .fn_getWaylandSurface = @ptrCast(&zglfw.getWaylandWindow),
                 .fn_getCocoaWindow = @ptrCast(&zglfw.getCocoaWindow),
             },
-            .{
-                .present_mode = .immediate
-            },
+            .{ .present_mode = .immediate },
         );
         errdefer gctx.destroy(allocator);
-
-        const rectangle_pipeline = createRectanglePipeline(gctx);
-        errdefer rectangle_pipeline.release();
 
         const bitmap_font = BitmapFont.init();
 
         var bitmap_font_texture_resources = try createBitmapFontTextureResources(allocator, gctx);
         errdefer bitmap_font_texture_resources.deinit();
 
+        const frame_bind_group_layout = createFrameBindGroupLayout(gctx);
+        errdefer frame_bind_group_layout.release();
+
         const text_bind_group_layout = createTextBindGroupLayout(gctx);
         errdefer text_bind_group_layout.release();
+
+        const frame_uniform_buffer = gctx.device.createBuffer(.{
+            .usage = .{ .uniform = true, .copy_dst = true },
+            .size = @sizeOf(FrameUniforms),
+        });
+        errdefer frame_uniform_buffer.release();
+
+        const frame_bind_group = createFrameBindGroup(gctx, frame_bind_group_layout, frame_uniform_buffer);
+        errdefer frame_bind_group.release();
 
         const bitmap_text_bind_group = createTextBindGroup(gctx, text_bind_group_layout, bitmap_font_texture_resources.view, bitmap_font_texture_resources.sampler);
         errdefer bitmap_text_bind_group.release();
 
-        const bitmap_text_pipeline = createBitmapTextPipeline(gctx, text_bind_group_layout);
+        const rectangle_pipeline = createRectanglePipeline(gctx, frame_bind_group_layout);
+        errdefer rectangle_pipeline.release();
+
+        const bitmap_text_pipeline = createBitmapTextPipeline(gctx, frame_bind_group_layout, text_bind_group_layout);
         errdefer bitmap_text_pipeline.release();
 
-        const rectangle_vertex_buffer = gctx.device.createBuffer(.{
+        const rectangle_instance_buffer = gctx.device.createBuffer(.{
             .usage = .{ .vertex = true, .copy_dst = true },
-            .size = @sizeOf(Vertex) * rectangle_vertex_count * max_rectangles_per_frame,
+            .size = @sizeOf(RectangleInstance) * max_rectangles_per_frame,
         });
-        errdefer rectangle_vertex_buffer.release();
+        errdefer rectangle_instance_buffer.release();
 
-        const text_vertex_buffer = gctx.device.createBuffer(.{
+        const text_instance_buffer = gctx.device.createBuffer(.{
             .usage = .{ .vertex = true, .copy_dst = true },
-            .size = @sizeOf(TextVertex) * max_text_vertices_per_frame,
+            .size = @sizeOf(GlyphInstance) * max_text_glyphs_per_frame,
         });
-        errdefer text_vertex_buffer.release();
+        errdefer text_instance_buffer.release();
 
-        const text_vertices = try allocator.alloc(TextVertex, max_text_vertices_per_frame);
-        errdefer allocator.free(text_vertices);
+        const text_instances = try allocator.alloc(GlyphInstance, max_text_glyphs_per_frame);
+        errdefer allocator.free(text_instances);
 
         return .{
             .allocator = allocator,
             .gctx = gctx,
+            .frame_bind_group_layout = frame_bind_group_layout,
+            .frame_bind_group = frame_bind_group,
+            .frame_uniform_buffer = frame_uniform_buffer,
             .rectangle_pipeline = rectangle_pipeline,
             .bitmap_text_pipeline = bitmap_text_pipeline,
             .text_bind_group_layout = text_bind_group_layout,
             .bitmap_text_bind_group = bitmap_text_bind_group,
-            .rectangle_vertex_buffer = rectangle_vertex_buffer,
-            .text_vertex_buffer = text_vertex_buffer,
-            .text_vertices = text_vertices,
+            .rectangle_instance_buffer = rectangle_instance_buffer,
+            .text_instance_buffer = text_instance_buffer,
+            .text_instances = text_instances,
             .bitmap_font = bitmap_font,
             .bitmap_font_texture = bitmap_font_texture_resources.texture,
             .bitmap_font_texture_view = bitmap_font_texture_resources.view,
@@ -157,16 +182,19 @@ pub const ZgpuRenderer = struct {
     }
 
     pub fn deinit(self: *ZgpuRenderer) void {
-        self.allocator.free(self.text_vertices);
+        self.allocator.free(self.text_instances);
         self.bitmap_text_bind_group.release();
+        self.frame_bind_group.release();
         self.bitmap_font_sampler.release();
         self.bitmap_font_texture_view.release();
         self.bitmap_font_texture.release();
-        self.text_vertex_buffer.release();
-        self.rectangle_vertex_buffer.release();
+        self.text_instance_buffer.release();
+        self.rectangle_instance_buffer.release();
+        self.frame_uniform_buffer.release();
         self.bitmap_text_pipeline.release();
-        self.text_bind_group_layout.release();
         self.rectangle_pipeline.release();
+        self.text_bind_group_layout.release();
+        self.frame_bind_group_layout.release();
         self.gctx.destroy(self.allocator);
     }
 
@@ -192,11 +220,38 @@ pub const ZgpuRenderer = struct {
         return self.pass.?;
     }
 
+    pub fn initDebugUi(self: *ZgpuRenderer, window: *zglfw.Window) !void {
+        zgui.backend.init(
+            window,
+            self.gctx.device,
+            @intFromEnum(zgpu.GraphicsContext.swapchain_format),
+            @intFromEnum(wgpu.TextureFormat.undef),
+        );
+    }
+
+    pub fn deinitDebugUi(self: *ZgpuRenderer) void {
+        _ = self;
+        zgui.backend.deinit();
+    }
+
+    pub fn beginDebugUi(self: *ZgpuRenderer, screen_width: u32, screen_height: u32) void {
+        _ = self;
+        zgui.backend.newFrame(screen_width, screen_height);
+    }
+
+    pub fn endDebugUi(self: *ZgpuRenderer) void {
+        zgui.backend.draw(self.currentRenderPass());
+    }
+
     pub fn beginFrame(self: *ZgpuRenderer, clear_color: Color) bool {
         if (!self.gctx.canRender()) return false;
 
         self.rectangle_count = 0;
-        self.text_vertex_count = 0;
+        self.text_instance_count = 0;
+
+        const framebuffer_size = self.framebufferSize();
+        const frame_uniforms = FrameUniforms{ .framebuffer_size = .{ framebuffer_size.x, framebuffer_size.y } };
+        self.gctx.queue.writeBuffer(self.frame_uniform_buffer, 0, FrameUniforms, &[_]FrameUniforms{frame_uniforms});
 
         const back_buffer_view = self.gctx.swapchain.getCurrentTextureView();
         const encoder = self.gctx.device.createCommandEncoder(null);
@@ -235,24 +290,23 @@ pub const ZgpuRenderer = struct {
     pub fn drawRectangle(self: *ZgpuRenderer, rectangle: Rectangle) void {
         std.debug.assert(self.rectangle_count < max_rectangles_per_frame);
 
-        const vertices = rectangleVertices(rectangle, self.framebufferSize());
-        const vertex_offset = self.rectangle_count * rectangle_vertex_count;
-        const byte_offset = vertex_offset * @sizeOf(Vertex);
+        const instance = rectangleInstance(rectangle);
+        const byte_offset = self.rectangle_count * @sizeOf(RectangleInstance);
 
-        self.gctx.queue.writeBuffer(self.rectangle_vertex_buffer, byte_offset, Vertex, &vertices);
+        self.gctx.queue.writeBuffer(self.rectangle_instance_buffer, byte_offset, RectangleInstance, &[_]RectangleInstance{instance});
 
         const pass = self.pass.?;
         pass.setPipeline(self.rectangle_pipeline);
-        pass.setVertexBuffer(0, self.rectangle_vertex_buffer, @intCast(byte_offset), @sizeOf(Vertex) * vertices.len);
-        pass.draw(rectangle_vertex_count, 1, 0, 0);
+        pass.setBindGroup(0, self.frame_bind_group, null);
+        pass.setVertexBuffer(0, self.rectangle_instance_buffer, @intCast(byte_offset), @sizeOf(RectangleInstance));
+        pass.draw(quad_vertex_count, 1, 0, 0);
 
         self.rectangle_count += 1;
     }
 
     pub fn drawText(self: *ZgpuRenderer, text: Text) void {
         const view = std.unicode.Utf8View.init(text.text) catch return;
-        const start_vertex = self.text_vertex_count;
-        const framebuffer_size = self.framebufferSize();
+        const start_instance = self.text_instance_count;
         const color = colorComponents(text.color);
         const scale_factor = text.size / self.bitmap_font.base_size;
         const spacing = @trunc(scale_factor);
@@ -271,9 +325,8 @@ pub const ZgpuRenderer = struct {
             const glyph = self.bitmap_font.glyph(codepoint) orelse self.bitmap_font.glyph('?').?;
 
             if ((codepoint != ' ') and (codepoint != '\t')) {
-                std.debug.assert(self.text_vertex_count + text_vertex_count_per_glyph <= max_text_vertices_per_frame);
-                appendGlyphVertices(
-                    self.text_vertices[self.text_vertex_count..][0..text_vertex_count_per_glyph],
+                std.debug.assert(self.text_instance_count < max_text_glyphs_per_frame);
+                self.text_instances[self.text_instance_count] = glyphInstance(
                     .{
                         .x = text.position.x + text_offset_x,
                         .y = text.position.y + text_offset_y,
@@ -285,36 +338,36 @@ pub const ZgpuRenderer = struct {
                     glyph.atlas_bounds,
                     self.bitmap_font.width,
                     self.bitmap_font.height,
-                    framebuffer_size,
                     color,
                 );
-                self.text_vertex_count += text_vertex_count_per_glyph;
+                self.text_instance_count += 1;
             }
 
             text_offset_x += glyph.width * scale_factor + spacing;
         }
 
-        self.drawTextVertices(start_vertex, self.bitmap_text_pipeline, self.bitmap_text_bind_group);
+        self.drawTextInstances(start_instance);
     }
 
-    fn drawTextVertices(self: *ZgpuRenderer, start_vertex: usize, pipeline: wgpu.RenderPipeline, bind_group: wgpu.BindGroup) void {
-        const vertex_count = self.text_vertex_count - start_vertex;
-        if (vertex_count == 0) return;
+    fn drawTextInstances(self: *ZgpuRenderer, start_instance: usize) void {
+        const instance_count = self.text_instance_count - start_instance;
+        if (instance_count == 0) return;
 
-        const byte_offset = start_vertex * @sizeOf(TextVertex);
-        const byte_count = vertex_count * @sizeOf(TextVertex);
+        const byte_offset = start_instance * @sizeOf(GlyphInstance);
+        const byte_count = instance_count * @sizeOf(GlyphInstance);
         self.gctx.queue.writeBuffer(
-            self.text_vertex_buffer,
+            self.text_instance_buffer,
             byte_offset,
-            TextVertex,
-            self.text_vertices[start_vertex..self.text_vertex_count],
+            GlyphInstance,
+            self.text_instances[start_instance..self.text_instance_count],
         );
 
         const pass = self.pass.?;
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, bind_group, null);
-        pass.setVertexBuffer(0, self.text_vertex_buffer, @intCast(byte_offset), byte_count);
-        pass.draw(@intCast(vertex_count), 1, 0, 0);
+        pass.setPipeline(self.bitmap_text_pipeline);
+        pass.setBindGroup(0, self.frame_bind_group, null);
+        pass.setBindGroup(1, self.bitmap_text_bind_group, null);
+        pass.setVertexBuffer(0, self.text_instance_buffer, @intCast(byte_offset), byte_count);
+        pass.draw(quad_vertex_count, @intCast(instance_count), 0, 0);
     }
 };
 
@@ -461,6 +514,31 @@ fn createBitmapFontTextureResources(allocator: std.mem.Allocator, gctx: *zgpu.Gr
     };
 }
 
+fn createFrameBindGroupLayout(gctx: *zgpu.GraphicsContext) wgpu.BindGroupLayout {
+    const entries = [_]wgpu.BindGroupLayoutEntry{
+        zgpu.bufferEntry(0, .{ .vertex = true }, .uniform, false, @sizeOf(FrameUniforms)),
+    };
+
+    return gctx.device.createBindGroupLayout(.{
+        .entry_count = entries.len,
+        .entries = &entries,
+    });
+}
+
+fn createFrameBindGroup(gctx: *zgpu.GraphicsContext, layout: wgpu.BindGroupLayout, buffer: wgpu.Buffer) wgpu.BindGroup {
+    const entries = [_]wgpu.BindGroupEntry{.{
+        .binding = 0,
+        .buffer = buffer,
+        .size = @sizeOf(FrameUniforms),
+    }};
+
+    return gctx.device.createBindGroup(.{
+        .layout = layout,
+        .entry_count = entries.len,
+        .entries = &entries,
+    });
+}
+
 fn createTextBindGroupLayout(gctx: *zgpu.GraphicsContext) wgpu.BindGroupLayout {
     const entries = [_]wgpu.BindGroupLayoutEntry{
         zgpu.textureEntry(0, .{ .fragment = true }, .float, .tvdim_2d, false),
@@ -491,7 +569,7 @@ fn createTextBindGroup(
     });
 }
 
-fn createBitmapTextPipeline(gctx: *zgpu.GraphicsContext, bind_group_layout: wgpu.BindGroupLayout) wgpu.RenderPipeline {
+fn createBitmapTextPipeline(gctx: *zgpu.GraphicsContext, frame_bind_group_layout: wgpu.BindGroupLayout, text_bind_group_layout: wgpu.BindGroupLayout) wgpu.RenderPipeline {
     const shader_module = zgpu.createWgslShaderModule(
         gctx.device,
         @embedFile("text_bitmap.wgsl"),
@@ -499,7 +577,7 @@ fn createBitmapTextPipeline(gctx: *zgpu.GraphicsContext, bind_group_layout: wgpu
     );
     defer shader_module.release();
 
-    const bind_group_layouts = [_]wgpu.BindGroupLayout{bind_group_layout};
+    const bind_group_layouts = [_]wgpu.BindGroupLayout{ frame_bind_group_layout, text_bind_group_layout };
     const pipeline_layout = gctx.device.createPipelineLayout(.{
         .bind_group_layout_count = bind_group_layouts.len,
         .bind_group_layouts = &bind_group_layouts,
@@ -507,12 +585,15 @@ fn createBitmapTextPipeline(gctx: *zgpu.GraphicsContext, bind_group_layout: wgpu
     defer pipeline_layout.release();
 
     const vertex_attributes = [_]wgpu.VertexAttribute{
-        .{ .format = .float32x2, .offset = @offsetOf(TextVertex, "position"), .shader_location = 0 },
-        .{ .format = .float32x2, .offset = @offsetOf(TextVertex, "uv"), .shader_location = 1 },
-        .{ .format = .float32x4, .offset = @offsetOf(TextVertex, "color"), .shader_location = 2 },
+        .{ .format = .float32x2, .offset = @offsetOf(GlyphInstance, "position"), .shader_location = 0 },
+        .{ .format = .float32x2, .offset = @offsetOf(GlyphInstance, "size"), .shader_location = 1 },
+        .{ .format = .float32x2, .offset = @offsetOf(GlyphInstance, "uv_min"), .shader_location = 2 },
+        .{ .format = .float32x2, .offset = @offsetOf(GlyphInstance, "uv_max"), .shader_location = 3 },
+        .{ .format = .float32x4, .offset = @offsetOf(GlyphInstance, "color"), .shader_location = 4 },
     };
     const vertex_buffers = [_]wgpu.VertexBufferLayout{.{
-        .array_stride = @sizeOf(TextVertex),
+        .array_stride = @sizeOf(GlyphInstance),
+        .step_mode = .instance,
         .attribute_count = vertex_attributes.len,
         .attributes = &vertex_attributes,
     }};
@@ -549,7 +630,7 @@ fn createBitmapTextPipeline(gctx: *zgpu.GraphicsContext, bind_group_layout: wgpu
     });
 }
 
-fn createRectanglePipeline(gctx: *zgpu.GraphicsContext) wgpu.RenderPipeline {
+fn createRectanglePipeline(gctx: *zgpu.GraphicsContext, frame_bind_group_layout: wgpu.BindGroupLayout) wgpu.RenderPipeline {
     const shader_module = zgpu.createWgslShaderModule(
         gctx.device,
         @embedFile("rectangle.wgsl"),
@@ -558,16 +639,26 @@ fn createRectanglePipeline(gctx: *zgpu.GraphicsContext) wgpu.RenderPipeline {
     defer shader_module.release();
 
     const vertex_attributes = [_]wgpu.VertexAttribute{
-        .{ .format = .float32x2, .offset = @offsetOf(Vertex, "position"), .shader_location = 0 },
-        .{ .format = .float32x4, .offset = @offsetOf(Vertex, "color"), .shader_location = 1 },
+        .{ .format = .float32x2, .offset = @offsetOf(RectangleInstance, "position"), .shader_location = 0 },
+        .{ .format = .float32x2, .offset = @offsetOf(RectangleInstance, "size"), .shader_location = 1 },
+        .{ .format = .float32x4, .offset = @offsetOf(RectangleInstance, "color"), .shader_location = 2 },
     };
     const vertex_buffers = [_]wgpu.VertexBufferLayout{.{
-        .array_stride = @sizeOf(Vertex),
+        .array_stride = @sizeOf(RectangleInstance),
+        .step_mode = .instance,
         .attribute_count = vertex_attributes.len,
         .attributes = &vertex_attributes,
     }};
 
+    const bind_group_layouts = [_]wgpu.BindGroupLayout{frame_bind_group_layout};
+    const pipeline_layout = gctx.device.createPipelineLayout(.{
+        .bind_group_layout_count = bind_group_layouts.len,
+        .bind_group_layouts = &bind_group_layouts,
+    });
+    defer pipeline_layout.release();
+
     return gctx.device.createRenderPipeline(.{
+        .layout = pipeline_layout,
         .vertex = .{
             .module = shader_module,
             .entry_point = "vs_main",
@@ -583,76 +674,34 @@ fn createRectanglePipeline(gctx: *zgpu.GraphicsContext) wgpu.RenderPipeline {
     });
 }
 
-fn appendGlyphVertices(
-    vertices: []TextVertex,
+fn glyphInstance(
     position: Vec2,
     size: Vec2,
     atlas_bounds: Bounds,
     atlas_width: f32,
     atlas_height: f32,
-    framebuffer_size: Vec2,
     color: [4]f32,
-) void {
-    std.debug.assert(vertices.len == text_vertex_count_per_glyph);
-
-    const left = position.x;
-    const top = position.y;
-    const right = position.x + size.x;
-    const bottom = position.y + size.y;
-
+) GlyphInstance {
     const uv_left = atlas_bounds.left / atlas_width;
     const uv_top = atlas_bounds.top / atlas_height;
     const uv_right = atlas_bounds.right / atlas_width;
     const uv_bottom = atlas_bounds.bottom / atlas_height;
 
-    const positions = [_]Vec2{
-        .{ .x = left, .y = top },
-        .{ .x = left, .y = bottom },
-        .{ .x = right, .y = top },
-        .{ .x = right, .y = top },
-        .{ .x = left, .y = bottom },
-        .{ .x = right, .y = bottom },
+    return .{
+        .position = .{ position.x, position.y },
+        .size = .{ size.x, size.y },
+        .uv_min = .{ uv_left, uv_top },
+        .uv_max = .{ uv_right, uv_bottom },
+        .color = color,
     };
-    const uvs = [_][2]f32{
-        .{ uv_left, uv_top },
-        .{ uv_left, uv_bottom },
-        .{ uv_right, uv_top },
-        .{ uv_right, uv_top },
-        .{ uv_left, uv_bottom },
-        .{ uv_right, uv_bottom },
-    };
-
-    for (vertices, positions, uvs) |*vertex, vertex_position, uv| {
-        vertex.* = .{
-            .position = screenToClip(vertex_position, framebuffer_size),
-            .uv = uv,
-            .color = color,
-        };
-    }
 }
 
-fn rectangleVertices(rectangle: Rectangle, framebuffer_size: Vec2) [rectangle_vertex_count]Vertex {
-    const left = rectangle.position.x;
-    const top = rectangle.position.y;
-    const right = rectangle.position.x + rectangle.size.x;
-    const bottom = rectangle.position.y + rectangle.size.y;
-
-    const positions = [_]Vec2{
-        .{ .x = left, .y = top },
-        .{ .x = left, .y = bottom },
-        .{ .x = right, .y = top },
-        .{ .x = right, .y = top },
-        .{ .x = left, .y = bottom },
-        .{ .x = right, .y = bottom },
+fn rectangleInstance(rectangle: Rectangle) RectangleInstance {
+    return .{
+        .position = .{ rectangle.position.x, rectangle.position.y },
+        .size = .{ rectangle.size.x, rectangle.size.y },
+        .color = colorComponents(rectangle.color),
     };
-
-    const color = colorComponents(rectangle.color);
-
-    var vertices: [rectangle_vertex_count]Vertex = undefined;
-    for (&vertices, positions) |*vertex, position| {
-        vertex.* = .{ .position = screenToClip(position, framebuffer_size), .color = color };
-    }
-    return vertices;
 }
 
 fn colorComponents(color: Color) [4]f32 {
@@ -661,12 +710,5 @@ fn colorComponents(color: Color) [4]f32 {
         @floatCast(color.g),
         @floatCast(color.b),
         @floatCast(color.a),
-    };
-}
-
-fn screenToClip(position: Vec2, framebuffer_size: Vec2) [2]f32 {
-    return .{
-        position.x / framebuffer_size.x * 2.0 - 1.0,
-        1.0 - position.y / framebuffer_size.y * 2.0,
     };
 }

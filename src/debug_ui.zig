@@ -1,10 +1,7 @@
 const std = @import("std");
 
 const zglfw = @import("zglfw");
-const zgpu = @import("zgpu");
 const zgui = @import("zgui");
-
-const wgpu = zgpu.wgpu;
 
 pub const FrameStats = struct {
     fps: f64,
@@ -14,35 +11,60 @@ pub const FrameStats = struct {
 };
 
 pub const DebugUi = struct {
-    pub fn init(allocator: std.mem.Allocator, window: *zglfw.Window, gctx: *zgpu.GraphicsContext) DebugUi {
-        zgui.init(allocator);
-        zgui.io.setIniFilename(null);
+    previous_time: f64 = 0.0,
+    fps_refresh_time: f64 = 0.0,
+    fps_counter: u32 = 0,
+    fps: f64 = 0.0,
+    average_cpu_time_ms: f64 = 0.0,
 
-        zgui.backend.init(
-            window,
-            gctx.device,
-            @intFromEnum(zgpu.GraphicsContext.swapchain_format),
-            @intFromEnum(wgpu.TextureFormat.undef),
-        );
+    pub fn init(allocator: std.mem.Allocator, window: *zglfw.Window, renderer: anytype) !DebugUi {
+        zgui.init(allocator);
+        errdefer zgui.deinit();
+
+        zgui.io.setIniFilename(null);
+        try renderer.initDebugUi(window);
 
         const content_scale = window.getContentScale();
         zgui.getStyle().scaleAllSizes(@max(content_scale[0], content_scale[1]));
 
-        return .{};
+        const now = zglfw.getTime();
+        return .{
+            .previous_time = now,
+            .fps_refresh_time = now,
+        };
     }
 
-    pub fn deinit(self: *DebugUi) void {
+    pub fn deinit(self: *DebugUi, renderer: anytype) void {
         _ = self;
-        zgui.backend.deinit();
+        renderer.deinitDebugUi();
         zgui.deinit();
     }
 
-    pub fn draw(self: *DebugUi, pass: wgpu.RenderPassEncoder, stats: FrameStats) void {
-        _ = self;
+    pub fn draw(self: *DebugUi, renderer: anytype, framebuffer_size: anytype) void {
+        self.tick(zglfw.getTime());
 
-        zgui.backend.newFrame(stats.screen_width, stats.screen_height);
-        drawStatsWindow(stats);
-        zgui.backend.draw(pass);
+        renderer.beginDebugUi(framebuffer_size.width, framebuffer_size.height);
+        drawStatsWindow(.{
+            .fps = self.fps,
+            .average_cpu_time_ms = self.average_cpu_time_ms,
+            .screen_width = framebuffer_size.width,
+            .screen_height = framebuffer_size.height,
+        });
+        renderer.endDebugUi();
+    }
+
+    fn tick(self: *DebugUi, now_secs: f64) void {
+        self.previous_time = now_secs;
+
+        if ((now_secs - self.fps_refresh_time) >= 1.0) {
+            const elapsed = now_secs - self.fps_refresh_time;
+            self.fps = @as(f64, @floatFromInt(self.fps_counter)) / elapsed;
+            self.average_cpu_time_ms = if (self.fps > 0.0) (1.0 / self.fps) * 1000.0 else 0.0;
+            self.fps_refresh_time = now_secs;
+            self.fps_counter = 0;
+        }
+
+        self.fps_counter += 1;
     }
 };
 
