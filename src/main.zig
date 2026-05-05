@@ -32,6 +32,12 @@ pub fn main() !void {
             .size = 24,
             .color = render.Color.black,
         });
+
+        renderer.drawRectangle(.{
+            .position = .{ .x = 0, .y = 48},
+            .size = .{ .x = 48, .y = 48},
+            .color = render.Color.blue,
+        });
     }
 }
 
