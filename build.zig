@@ -35,6 +35,14 @@ pub fn build(b: *std.Build) void {
     @import("zgpu").addLibraryPathsTo(exe);
     exe.linkLibrary(zgpu.artifact("zdawn"));
 
+    const zgui = b.dependency("zgui", .{
+        .target = target,
+        .optimize = optimize,
+        .backend = .glfw_wgpu,
+    });
+    exe.root_module.addImport("zgui", zgui.module("root"));
+    exe.linkLibrary(zgui.artifact("imgui"));
+
     if (target.result.os.tag == .linux) {
         const system_sdk = b.dependency("system_sdk", .{});
         exe.addLibraryPath(system_sdk.path("linux/lib/x86_64-linux-gnu"));

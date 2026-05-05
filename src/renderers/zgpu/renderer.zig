@@ -29,6 +29,11 @@ pub const Vec2 = struct {
     y: f32,
 };
 
+pub const FramebufferPixelSize = struct {
+    width: u32,
+    height: u32,
+};
+
 /// Position and size are framebuffer pixels, measured from the top-left.
 pub const Rectangle = struct {
     position: Vec2,
@@ -96,7 +101,9 @@ pub const ZgpuRenderer = struct {
                 .fn_getWaylandSurface = @ptrCast(&zglfw.getWaylandWindow),
                 .fn_getCocoaWindow = @ptrCast(&zglfw.getCocoaWindow),
             },
-            .{},
+            .{
+                .present_mode = .immediate
+            },
         );
         errdefer gctx.destroy(allocator);
 
@@ -168,6 +175,21 @@ pub const ZgpuRenderer = struct {
             .x = @floatFromInt(self.gctx.swapchain_descriptor.width),
             .y = @floatFromInt(self.gctx.swapchain_descriptor.height),
         };
+    }
+
+    pub fn framebufferPixelSize(self: *ZgpuRenderer) FramebufferPixelSize {
+        return .{
+            .width = self.gctx.swapchain_descriptor.width,
+            .height = self.gctx.swapchain_descriptor.height,
+        };
+    }
+
+    pub fn graphicsContext(self: *ZgpuRenderer) *zgpu.GraphicsContext {
+        return self.gctx;
+    }
+
+    pub fn currentRenderPass(self: *ZgpuRenderer) wgpu.RenderPassEncoder {
+        return self.pass.?;
     }
 
     pub fn beginFrame(self: *ZgpuRenderer, clear_color: Color) bool {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const zglfw = @import("zglfw");
 
+const debug_ui = @import("debug_ui.zig");
 const render = @import("renderers/zgpu/renderer.zig");
 const ZgpuRenderer = render.ZgpuRenderer;
 
@@ -16,6 +17,9 @@ pub fn main() !void {
     const allocator = std.heap.page_allocator;
     var renderer = try ZgpuRenderer.init(allocator, window);
     defer renderer.deinit();
+
+    var debug_ui_state = debug_ui.DebugUi.init(allocator, window, renderer.graphicsContext());
+    defer debug_ui_state.deinit();
 
     var glyph_demo_buffer: [512]u8 = undefined;
     const glyph_demo_text = buildGlyphDemoText(glyph_demo_buffer[0..]);
@@ -34,9 +38,18 @@ pub fn main() !void {
         });
 
         renderer.drawRectangle(.{
-            .position = .{ .x = 0, .y = 48},
-            .size = .{ .x = 48, .y = 48},
+            .position = .{ .x = 0, .y = 48 },
+            .size = .{ .x = 48, .y = 48 },
             .color = render.Color.blue,
+        });
+
+        const framebuffer_size = renderer.framebufferPixelSize();
+        const gctx = renderer.graphicsContext();
+        debug_ui_state.draw(renderer.currentRenderPass(), .{
+            .fps = gctx.stats.fps,
+            .average_cpu_time_ms = gctx.stats.average_cpu_time,
+            .screen_width = framebuffer_size.width,
+            .screen_height = framebuffer_size.height,
         });
     }
 }
