@@ -109,19 +109,15 @@ pub const VulkanRenderer = struct {
     graphics_queue: Queue = .{},
     present_queue: Queue = .{},
 
-    swapchain: SwapchainResources = .{},
+    swapchain: ?SwapchainGeneration = null,
     render_pass: vk.RenderPass = .null_handle,
-    framebuffers: ?[]vk.Framebuffer = null,
     command_pool: vk.CommandPool = .null_handle,
-    command_buffers: ?[]vk.CommandBuffer = null,
-    image_fences: ?[]vk.Fence = null,
 
     image_available: [max_frames_in_flight]vk.Semaphore = [_]vk.Semaphore{.null_handle} ** max_frames_in_flight,
     render_finished: [max_frames_in_flight]vk.Semaphore = [_]vk.Semaphore{.null_handle} ** max_frames_in_flight,
     in_flight_fences: [max_frames_in_flight]vk.Fence = [_]vk.Fence{.null_handle} ** max_frames_in_flight,
     current_frame: usize = 0,
-    current_image_index: u32 = 0,
-    current_command_buffer: ?vk.CommandBuffer = null,
+    fatal_render_error: bool = false,
 
     rectangle_pipeline_layout: vk.PipelineLayout = .null_handle,
     rectangle_pipeline: vk.Pipeline = .null_handle,
@@ -139,6 +135,173 @@ pub const VulkanRenderer = struct {
     rectangle_count: usize = 0,
     text_instance_count: usize = 0,
     debug_ui_initialized: bool = false,
+
+    pub const Frame = struct {
+        renderer: *VulkanRenderer,
+        frame_index: usize,
+        image_index: u32,
+        command_buffer: vk.CommandBuffer,
+        ended: bool = false,
+
+        pub fn beginDebugUi(self: *Frame, screen_width: u32, screen_height: u32) void {
+            _ = self;
+            zgui.backend.newFrame(screen_width, screen_height);
+        }
+
+        pub fn endDebugUi(self: *Frame) void {
+            zgui.backend.render(imguiHandle(self.command_buffer));
+        }
+
+        pub fn drawRectangle(self: *Frame, rectangle: Rectangle) void {
+            const renderer = self.renderer;
+            if (renderer.rectangle_count >= max_rectangles_per_frame) return;
+
+            const byte_offset = renderer.rectangle_count * @sizeOf(RectangleInstance);
+            const instance_buffer = &renderer.rectangle_instance_buffers[self.frame_index];
+            const mapped_instances: [*]RectangleInstance = @ptrCast(@alignCast(instance_buffer.mapped.?));
+            mapped_instances[renderer.rectangle_count] = rectangleInstance(rectangle);
+
+            renderer.dev.cmdBindPipeline(self.command_buffer, .graphics, renderer.rectangle_pipeline);
+            const offset = [_]vk.DeviceSize{@intCast(byte_offset)};
+            renderer.dev.cmdBindVertexBuffers(self.command_buffer, 0, 1, @ptrCast(&instance_buffer.buffer), &offset);
+            renderer.dev.cmdDraw(self.command_buffer, quad_vertex_count, 1, 0, 0);
+
+            renderer.rectangle_count += 1;
+        }
+
+        pub fn drawText(self: *Frame, text: Text) void {
+            const renderer = self.renderer;
+            const view = std.unicode.Utf8View.init(text.text) catch return;
+            const start_instance = renderer.text_instance_count;
+            const instance_buffer = &renderer.text_instance_buffers[self.frame_index];
+            const mapped_instances: [*]GlyphInstance = @ptrCast(@alignCast(instance_buffer.mapped.?));
+            const color = colorComponents(text.color);
+            const scale_factor = text.size / renderer.bitmap_font.base_size;
+            const spacing = @trunc(scale_factor);
+
+            var iterator = view.iterator();
+            var text_offset_x: f32 = 0.0;
+            var text_offset_y: f32 = 0.0;
+
+            while (iterator.nextCodepoint()) |codepoint| {
+                if (codepoint == '\n') {
+                    text_offset_y += text.size + text_line_spacing;
+                    text_offset_x = 0.0;
+                    continue;
+                }
+
+                const glyph = renderer.bitmap_font.glyph(codepoint) orelse renderer.bitmap_font.glyph('?').?;
+
+                if ((codepoint != ' ') and (codepoint != '\t')) {
+                    if (renderer.text_instance_count >= max_text_glyphs_per_frame) break;
+                    mapped_instances[renderer.text_instance_count] = glyphInstance(
+                        .{
+                            .x = text.position.x + text_offset_x,
+                            .y = text.position.y + text_offset_y,
+                        },
+                        .{
+                            .x = glyph.width * scale_factor,
+                            .y = glyph.height * scale_factor,
+                        },
+                        glyph.atlas_bounds,
+                        renderer.bitmap_font.width,
+                        renderer.bitmap_font.height,
+                        color,
+                    );
+                    renderer.text_instance_count += 1;
+                }
+
+                text_offset_x += glyph.width * scale_factor + spacing;
+            }
+
+            self.drawTextInstances(start_instance);
+        }
+
+        pub fn end(self: *Frame) void {
+            if (self.ended) return;
+            self.ended = true;
+
+            const renderer = self.renderer;
+            renderer.dev.cmdEndRenderPass(self.command_buffer);
+            renderer.dev.endCommandBuffer(self.command_buffer) catch |err| {
+                std.log.err("failed ending Vulkan command buffer: {s}", .{@errorName(err)});
+                renderer.fatal_render_error = true;
+                return;
+            };
+
+            const frame_fence = renderer.in_flight_fences[self.frame_index];
+            renderer.dev.resetFences(1, @ptrCast(&frame_fence)) catch |err| {
+                std.log.err("failed resetting Vulkan frame fence: {s}", .{@errorName(err)});
+                renderer.fatal_render_error = true;
+                return;
+            };
+
+            const wait_stage = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
+            const submit_info = vk.SubmitInfo{
+                .wait_semaphore_count = 1,
+                .p_wait_semaphores = @ptrCast(&renderer.image_available[self.frame_index]),
+                .p_wait_dst_stage_mask = &wait_stage,
+                .command_buffer_count = 1,
+                .p_command_buffers = @ptrCast(&self.command_buffer),
+                .signal_semaphore_count = 1,
+                .p_signal_semaphores = @ptrCast(&renderer.render_finished[self.frame_index]),
+            };
+
+            renderer.dev.queueSubmit(renderer.graphics_queue.handle, 1, @ptrCast(&submit_info), frame_fence) catch |err| {
+                std.log.err("failed submitting Vulkan frame: {s}", .{@errorName(err)});
+                renderer.fatal_render_error = true;
+                return;
+            };
+
+            const swapchain = renderer.swapchain.?;
+            const present_result = renderer.dev.queuePresentKHR(renderer.present_queue.handle, &.{
+                .wait_semaphore_count = 1,
+                .p_wait_semaphores = @ptrCast(&renderer.render_finished[self.frame_index]),
+                .swapchain_count = 1,
+                .p_swapchains = @ptrCast(&swapchain.handle),
+                .p_image_indices = @ptrCast(&self.image_index),
+            }) catch |err| switch (err) {
+                error.OutOfDateKHR => vk.Result.error_out_of_date_khr,
+                else => {
+                    std.log.err("failed presenting Vulkan frame: {s}", .{@errorName(err)});
+                    renderer.fatal_render_error = true;
+                    return;
+                },
+            };
+
+            renderer.current_frame = (self.frame_index + 1) % max_frames_in_flight;
+
+            if (present_result == .suboptimal_khr or present_result == .error_out_of_date_khr) {
+                renderer.recreateSwapchain() catch |err| {
+                    std.log.err("failed recreating Vulkan swapchain after present: {s}", .{@errorName(err)});
+                };
+            }
+        }
+
+        fn drawTextInstances(self: *Frame, start_instance: usize) void {
+            const renderer = self.renderer;
+            const instance_count = renderer.text_instance_count - start_instance;
+            if (instance_count == 0) return;
+
+            const byte_offset = start_instance * @sizeOf(GlyphInstance);
+
+            renderer.dev.cmdBindPipeline(self.command_buffer, .graphics, renderer.text_pipeline);
+            renderer.dev.cmdBindDescriptorSets(
+                self.command_buffer,
+                .graphics,
+                renderer.text_pipeline_layout,
+                0,
+                1,
+                @ptrCast(&renderer.text_descriptor_set),
+                0,
+                null,
+            );
+            const offset = [_]vk.DeviceSize{@intCast(byte_offset)};
+            const instance_buffer = &renderer.text_instance_buffers[self.frame_index];
+            renderer.dev.cmdBindVertexBuffers(self.command_buffer, 0, 1, @ptrCast(&instance_buffer.buffer), &offset);
+            renderer.dev.cmdDraw(self.command_buffer, quad_vertex_count, @intCast(instance_count), 0, 0);
+        }
+    };
 
     pub fn init(allocator: std.mem.Allocator, window: *zglfw.Window) !VulkanRenderer {
         if (!zglfw.isVulkanSupported()) return error.VulkanUnavailable;
@@ -172,14 +335,14 @@ pub const VulkanRenderer = struct {
         self.present_queue = Queue.init(self.dev, candidate.queues.present_family);
         self.mem_props = self.instance.getPhysicalDeviceMemoryProperties(self.pdev);
 
-        self.swapchain = try self.createSwapchain(.null_handle);
-        self.render_pass = try self.createRenderPass(self.swapchain.surface_format.format);
+        const surface_format = try findSurfaceFormat(&self, allocator, null);
+        self.render_pass = try self.createRenderPass(surface_format.format);
         self.command_pool = try self.dev.createCommandPool(&.{
             .flags = .{ .reset_command_buffer_bit = true },
             .queue_family_index = self.graphics_queue.family,
         }, null);
 
-        try self.createSwapchainDependents();
+        self.swapchain = try SwapchainGeneration.create(&self, .null_handle, surface_format);
         try self.createSyncObjects();
 
         const frame_constants_range = framePushConstantRange();
@@ -224,6 +387,7 @@ pub const VulkanRenderer = struct {
         if (self.has_device) {
             self.dev.deviceWaitIdle() catch {};
         }
+        self.deinitDebugUi();
 
         self.bitmap_font_texture.deinit(self);
         for (&self.text_instance_buffers) |*buffer| buffer.deinit(self);
@@ -236,11 +400,13 @@ pub const VulkanRenderer = struct {
         if (self.rectangle_pipeline != .null_handle) self.dev.destroyPipeline(self.rectangle_pipeline, null);
         if (self.rectangle_pipeline_layout != .null_handle) self.dev.destroyPipelineLayout(self.rectangle_pipeline_layout, null);
 
-        self.destroySwapchainDependents();
         self.destroySyncObjects();
+        if (self.swapchain) |*swapchain| {
+            swapchain.deinit(self);
+            self.swapchain = null;
+        }
         if (self.command_pool != .null_handle) self.dev.destroyCommandPool(self.command_pool, null);
         if (self.render_pass != .null_handle) self.dev.destroyRenderPass(self.render_pass, null);
-        self.swapchain.deinit(self);
 
         if (self.has_device) {
             self.dev.destroyDevice(null);
@@ -254,24 +420,23 @@ pub const VulkanRenderer = struct {
     }
 
     pub fn framebufferSize(self: *VulkanRenderer) Vec2 {
+        const swapchain = self.swapchain.?;
         return .{
-            .x = @floatFromInt(self.swapchain.extent.width),
-            .y = @floatFromInt(self.swapchain.extent.height),
+            .x = @floatFromInt(swapchain.extent.width),
+            .y = @floatFromInt(swapchain.extent.height),
         };
     }
 
     pub fn framebufferPixelSize(self: *VulkanRenderer) FramebufferPixelSize {
+        const swapchain = self.swapchain.?;
         return .{
-            .width = self.swapchain.extent.width,
-            .height = self.swapchain.extent.height,
+            .width = swapchain.extent.width,
+            .height = swapchain.extent.height,
         };
     }
 
-    pub fn currentRenderPass(self: *VulkanRenderer) vk.CommandBuffer {
-        return self.current_command_buffer.?;
-    }
-
     pub fn initDebugUi(self: *VulkanRenderer, window: *zglfw.Window) !void {
+        const swapchain = self.swapchain.?;
         if (!zgui.backend.loadFunctions(versionToU32(vk.API_VERSION_1_3), loadZguiVulkanFunction, self)) {
             return error.DebugUiVulkanLoadFailed;
         }
@@ -285,8 +450,8 @@ pub const VulkanRenderer = struct {
             .queue = imguiHandle(self.graphics_queue.handle),
             .descriptor_pool = null,
             .render_pass = imguiHandle(self.render_pass),
-            .min_image_count = self.swapchain.min_image_count,
-            .image_count = @intCast(self.swapchain.image_views.?.len),
+            .min_image_count = swapchain.min_image_count,
+            .image_count = @intCast(swapchain.image_views.len),
             .msaa_samples = (vk.SampleCountFlags{ .@"1_bit" = true }).toInt(),
             .descriptor_pool_size = 64,
         }, window);
@@ -295,89 +460,85 @@ pub const VulkanRenderer = struct {
 
     pub fn deinitDebugUi(self: *VulkanRenderer) void {
         if (!self.debug_ui_initialized) return;
+        if (self.has_device) self.dev.deviceWaitIdle() catch {};
         zgui.backend.deinit();
         self.debug_ui_initialized = false;
     }
 
-    pub fn beginDebugUi(self: *VulkanRenderer, screen_width: u32, screen_height: u32) void {
-        _ = self;
-        zgui.backend.newFrame(screen_width, screen_height);
-    }
+    pub fn beginFrame(self: *VulkanRenderer, clear_color: Color) ?Frame {
+        if (self.fatal_render_error) return null;
 
-    pub fn endDebugUi(self: *VulkanRenderer) void {
-        zgui.backend.render(imguiHandle(self.currentRenderPass()));
-    }
-
-    pub fn beginFrame(self: *VulkanRenderer, clear_color: Color) bool {
         const requested_extent = self.windowFramebufferExtent();
-        if (requested_extent.width == 0 or requested_extent.height == 0) return false;
+        if (requested_extent.width == 0 or requested_extent.height == 0) return null;
 
-        if (requested_extent.width != self.swapchain.extent.width or requested_extent.height != self.swapchain.extent.height) {
+        var swapchain = self.swapchain.?;
+
+        if (requested_extent.width != swapchain.extent.width or requested_extent.height != swapchain.extent.height) {
             self.recreateSwapchain() catch |err| {
                 std.log.err("failed to recreate Vulkan swapchain: {s}", .{@errorName(err)});
-                return false;
+                return null;
             };
+            swapchain = self.swapchain.?;
         }
 
-        const frame_fence = self.in_flight_fences[self.current_frame];
+        const frame_index = self.current_frame;
+        const frame_fence = self.in_flight_fences[frame_index];
         _ = self.dev.waitForFences(1, @ptrCast(&frame_fence), .true, std.math.maxInt(u64)) catch |err| {
             std.log.err("failed waiting for Vulkan frame fence: {s}", .{@errorName(err)});
-            return false;
+            self.fatal_render_error = true;
+            return null;
         };
 
         const acquired = self.dev.acquireNextImageKHR(
-            self.swapchain.handle,
+            swapchain.handle,
             std.math.maxInt(u64),
-            self.image_available[self.current_frame],
+            self.image_available[frame_index],
             .null_handle,
         ) catch |err| switch (err) {
             error.OutOfDateKHR => {
                 self.recreateSwapchain() catch |recreate_err| {
                     std.log.err("failed to recreate out-of-date Vulkan swapchain: {s}", .{@errorName(recreate_err)});
                 };
-                return false;
+                return null;
             },
             else => {
                 std.log.err("failed to acquire Vulkan swapchain image: {s}", .{@errorName(err)});
-                return false;
+                self.fatal_render_error = true;
+                return null;
             },
         };
 
-        self.current_image_index = acquired.image_index;
-        if (self.image_fences) |image_fences| {
-            const image_fence = image_fences[self.current_image_index];
-            if (image_fence != .null_handle) {
-                _ = self.dev.waitForFences(1, @ptrCast(&image_fence), .true, std.math.maxInt(u64)) catch |err| {
-                    std.log.err("failed waiting for Vulkan image fence: {s}", .{@errorName(err)});
-                    return false;
-                };
-            }
-            image_fences[self.current_image_index] = frame_fence;
+        const image_index = acquired.image_index;
+        const image_fence = swapchain.image_fences[image_index];
+        if (image_fence != .null_handle) {
+            _ = self.dev.waitForFences(1, @ptrCast(&image_fence), .true, std.math.maxInt(u64)) catch |err| {
+                std.log.err("failed waiting for Vulkan image fence: {s}", .{@errorName(err)});
+                self.fatal_render_error = true;
+                return null;
+            };
         }
+        swapchain.image_fences[image_index] = frame_fence;
 
-        self.dev.resetFences(1, @ptrCast(&frame_fence)) catch |err| {
-            std.log.err("failed resetting Vulkan frame fence: {s}", .{@errorName(err)});
-            return false;
-        };
-
-        const command_buffer = self.command_buffers.?[self.current_image_index];
+        const command_buffer = swapchain.command_buffers[image_index];
         self.dev.resetCommandBuffer(command_buffer, .{}) catch |err| {
             std.log.err("failed resetting Vulkan command buffer: {s}", .{@errorName(err)});
-            return false;
+            self.fatal_render_error = true;
+            return null;
         };
         self.dev.beginCommandBuffer(command_buffer, &.{}) catch |err| {
             std.log.err("failed beginning Vulkan command buffer: {s}", .{@errorName(err)});
-            return false;
+            self.fatal_render_error = true;
+            return null;
         };
 
         const render_area = vk.Rect2D{
             .offset = .{ .x = 0, .y = 0 },
-            .extent = self.swapchain.extent,
+            .extent = swapchain.extent,
         };
         const clear = clear_color.toVkClear();
         self.dev.cmdBeginRenderPass(command_buffer, &.{
             .render_pass = self.render_pass,
-            .framebuffer = self.framebuffers.?[self.current_image_index],
+            .framebuffer = swapchain.framebuffers[image_index],
             .render_area = render_area,
             .clear_value_count = 1,
             .p_clear_values = @ptrCast(&clear),
@@ -386,21 +547,21 @@ pub const VulkanRenderer = struct {
         const viewport = vk.Viewport{
             .x = 0,
             .y = 0,
-            .width = @floatFromInt(self.swapchain.extent.width),
-            .height = @floatFromInt(self.swapchain.extent.height),
+            .width = @floatFromInt(swapchain.extent.width),
+            .height = @floatFromInt(swapchain.extent.height),
             .min_depth = 0,
             .max_depth = 1,
         };
         const scissor = vk.Rect2D{
             .offset = .{ .x = 0, .y = 0 },
-            .extent = self.swapchain.extent,
+            .extent = swapchain.extent,
         };
         self.dev.cmdSetViewport(command_buffer, 0, 1, @ptrCast(&viewport));
         self.dev.cmdSetScissor(command_buffer, 0, 1, @ptrCast(&scissor));
 
         const frame_constants = FrameConstants{ .framebuffer_size = .{
-            @floatFromInt(self.swapchain.extent.width),
-            @floatFromInt(self.swapchain.extent.height),
+            @floatFromInt(swapchain.extent.width),
+            @floatFromInt(swapchain.extent.height),
         } };
         self.dev.cmdPushConstants(
             command_buffer,
@@ -411,149 +572,14 @@ pub const VulkanRenderer = struct {
             @ptrCast(&frame_constants),
         );
 
-        self.current_command_buffer = command_buffer;
         self.rectangle_count = 0;
         self.text_instance_count = 0;
-        return true;
-    }
-
-    pub fn endFrame(self: *VulkanRenderer) void {
-        const command_buffer = self.current_command_buffer orelse return;
-        self.dev.cmdEndRenderPass(command_buffer);
-        self.dev.endCommandBuffer(command_buffer) catch |err| {
-            std.log.err("failed ending Vulkan command buffer: {s}", .{@errorName(err)});
-            self.current_command_buffer = null;
-            return;
+        return .{
+            .renderer = self,
+            .frame_index = frame_index,
+            .image_index = image_index,
+            .command_buffer = command_buffer,
         };
-
-        const wait_stage = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
-        const submit_info = vk.SubmitInfo{
-            .wait_semaphore_count = 1,
-            .p_wait_semaphores = @ptrCast(&self.image_available[self.current_frame]),
-            .p_wait_dst_stage_mask = &wait_stage,
-            .command_buffer_count = 1,
-            .p_command_buffers = @ptrCast(&command_buffer),
-            .signal_semaphore_count = 1,
-            .p_signal_semaphores = @ptrCast(&self.render_finished[self.current_frame]),
-        };
-
-        self.dev.queueSubmit(self.graphics_queue.handle, 1, @ptrCast(&submit_info), self.in_flight_fences[self.current_frame]) catch |err| {
-            std.log.err("failed submitting Vulkan frame: {s}", .{@errorName(err)});
-            self.current_command_buffer = null;
-            return;
-        };
-
-        const present_result = self.dev.queuePresentKHR(self.present_queue.handle, &.{
-            .wait_semaphore_count = 1,
-            .p_wait_semaphores = @ptrCast(&self.render_finished[self.current_frame]),
-            .swapchain_count = 1,
-            .p_swapchains = @ptrCast(&self.swapchain.handle),
-            .p_image_indices = @ptrCast(&self.current_image_index),
-        }) catch |err| switch (err) {
-            error.OutOfDateKHR => vk.Result.error_out_of_date_khr,
-            else => {
-                std.log.err("failed presenting Vulkan frame: {s}", .{@errorName(err)});
-                self.current_command_buffer = null;
-                return;
-            },
-        };
-
-        self.current_command_buffer = null;
-        self.current_frame = (self.current_frame + 1) % max_frames_in_flight;
-
-        if (present_result == .suboptimal_khr or present_result == .error_out_of_date_khr) {
-            self.recreateSwapchain() catch |err| {
-                std.log.err("failed recreating Vulkan swapchain after present: {s}", .{@errorName(err)});
-            };
-        }
-    }
-
-    pub fn drawRectangle(self: *VulkanRenderer, rectangle: Rectangle) void {
-        std.debug.assert(self.rectangle_count < max_rectangles_per_frame);
-
-        const byte_offset = self.rectangle_count * @sizeOf(RectangleInstance);
-        const instance_buffer = &self.rectangle_instance_buffers[self.current_frame];
-        const mapped_instances: [*]RectangleInstance = @ptrCast(@alignCast(instance_buffer.mapped.?));
-        mapped_instances[self.rectangle_count] = rectangleInstance(rectangle);
-
-        const command_buffer = self.currentRenderPass();
-        self.dev.cmdBindPipeline(command_buffer, .graphics, self.rectangle_pipeline);
-        const offset = [_]vk.DeviceSize{@intCast(byte_offset)};
-        self.dev.cmdBindVertexBuffers(command_buffer, 0, 1, @ptrCast(&instance_buffer.buffer), &offset);
-        self.dev.cmdDraw(command_buffer, quad_vertex_count, 1, 0, 0);
-
-        self.rectangle_count += 1;
-    }
-
-    pub fn drawText(self: *VulkanRenderer, text: Text) void {
-        const view = std.unicode.Utf8View.init(text.text) catch return;
-        const start_instance = self.text_instance_count;
-        const instance_buffer = &self.text_instance_buffers[self.current_frame];
-        const mapped_instances: [*]GlyphInstance = @ptrCast(@alignCast(instance_buffer.mapped.?));
-        const color = colorComponents(text.color);
-        const scale_factor = text.size / self.bitmap_font.base_size;
-        const spacing = @trunc(scale_factor);
-
-        var iterator = view.iterator();
-        var text_offset_x: f32 = 0.0;
-        var text_offset_y: f32 = 0.0;
-
-        while (iterator.nextCodepoint()) |codepoint| {
-            if (codepoint == '\n') {
-                text_offset_y += text.size + text_line_spacing;
-                text_offset_x = 0.0;
-                continue;
-            }
-
-            const glyph = self.bitmap_font.glyph(codepoint) orelse self.bitmap_font.glyph('?').?;
-
-            if ((codepoint != ' ') and (codepoint != '\t')) {
-                std.debug.assert(self.text_instance_count < max_text_glyphs_per_frame);
-                mapped_instances[self.text_instance_count] = glyphInstance(
-                    .{
-                        .x = text.position.x + text_offset_x,
-                        .y = text.position.y + text_offset_y,
-                    },
-                    .{
-                        .x = glyph.width * scale_factor,
-                        .y = glyph.height * scale_factor,
-                    },
-                    glyph.atlas_bounds,
-                    self.bitmap_font.width,
-                    self.bitmap_font.height,
-                    color,
-                );
-                self.text_instance_count += 1;
-            }
-
-            text_offset_x += glyph.width * scale_factor + spacing;
-        }
-
-        self.drawTextInstances(start_instance);
-    }
-
-    fn drawTextInstances(self: *VulkanRenderer, start_instance: usize) void {
-        const instance_count = self.text_instance_count - start_instance;
-        if (instance_count == 0) return;
-
-        const byte_offset = start_instance * @sizeOf(GlyphInstance);
-
-        const command_buffer = self.currentRenderPass();
-        self.dev.cmdBindPipeline(command_buffer, .graphics, self.text_pipeline);
-        self.dev.cmdBindDescriptorSets(
-            command_buffer,
-            .graphics,
-            self.text_pipeline_layout,
-            0,
-            1,
-            @ptrCast(&self.text_descriptor_set),
-            0,
-            null,
-        );
-        const offset = [_]vk.DeviceSize{@intCast(byte_offset)};
-        const instance_buffer = &self.text_instance_buffers[self.current_frame];
-        self.dev.cmdBindVertexBuffers(command_buffer, 0, 1, @ptrCast(&instance_buffer.buffer), &offset);
-        self.dev.cmdDraw(command_buffer, quad_vertex_count, @intCast(instance_count), 0, 0);
     }
 
     fn createBuffer(
@@ -601,148 +627,19 @@ pub const VulkanRenderer = struct {
         return error.NoSuitableMemoryType;
     }
 
-    fn createSwapchain(self: *VulkanRenderer, old_handle: vk.SwapchainKHR) !SwapchainResources {
-        const caps = try self.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(self.pdev, self.surface);
-        const extent = findActualExtent(caps, self.windowFramebufferExtent());
-        if (extent.width == 0 or extent.height == 0) return error.InvalidSurfaceDimensions;
-
-        const surface_format = try findSurfaceFormat(self, self.allocator);
-        const present_mode = try findPresentMode(self, self.allocator);
-
-        var image_count = caps.min_image_count + 1;
-        if (caps.max_image_count > 0) image_count = @min(image_count, caps.max_image_count);
-
-        const qfi = [_]u32{ self.graphics_queue.family, self.present_queue.family };
-        const sharing_mode: vk.SharingMode = if (self.graphics_queue.family != self.present_queue.family) .concurrent else .exclusive;
-        const concurrent = sharing_mode == .concurrent;
-
-        const handle = try self.dev.createSwapchainKHR(&.{
-            .surface = self.surface,
-            .min_image_count = image_count,
-            .image_format = surface_format.format,
-            .image_color_space = surface_format.color_space,
-            .image_extent = extent,
-            .image_array_layers = 1,
-            .image_usage = .{ .color_attachment_bit = true },
-            .image_sharing_mode = sharing_mode,
-            .queue_family_index_count = if (concurrent) qfi.len else 0,
-            .p_queue_family_indices = if (concurrent) &qfi else undefined,
-            .pre_transform = caps.current_transform,
-            .composite_alpha = .{ .opaque_bit_khr = true },
-            .present_mode = present_mode,
-            .clipped = .true,
-            .old_swapchain = old_handle,
-        }, null);
-        errdefer self.dev.destroySwapchainKHR(handle, null);
-
-        if (old_handle != .null_handle) self.dev.destroySwapchainKHR(old_handle, null);
-
-        const images = try self.dev.getSwapchainImagesAllocKHR(handle, self.allocator);
-        defer self.allocator.free(images);
-
-        const image_views = try self.allocator.alloc(vk.ImageView, images.len);
-        errdefer self.allocator.free(image_views);
-
-        var initialized: usize = 0;
-        errdefer for (image_views[0..initialized]) |view| self.dev.destroyImageView(view, null);
-
-        for (images, image_views) |image, *view_out| {
-            view_out.* = try self.dev.createImageView(&.{
-                .image = image,
-                .view_type = .@"2d",
-                .format = surface_format.format,
-                .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-                .subresource_range = .{
-                    .aspect_mask = .{ .color_bit = true },
-                    .base_mip_level = 0,
-                    .level_count = 1,
-                    .base_array_layer = 0,
-                    .layer_count = 1,
-                },
-            }, null);
-            initialized += 1;
-        }
-
-        return .{
-            .handle = handle,
-            .surface_format = surface_format,
-            .present_mode = present_mode,
-            .extent = extent,
-            .min_image_count = @max(caps.min_image_count, 2),
-            .image_views = image_views,
-        };
-    }
-
     fn recreateSwapchain(self: *VulkanRenderer) !void {
         const requested_extent = self.windowFramebufferExtent();
         if (requested_extent.width == 0 or requested_extent.height == 0) return error.InvalidSurfaceDimensions;
 
         try self.dev.deviceWaitIdle();
 
-        self.destroySwapchainDependents();
-        const old_handle = self.swapchain.handle;
-        self.swapchain.destroyImageViews(self);
-        self.swapchain = try self.createSwapchain(old_handle);
-        try self.createSwapchainDependents();
+        var old_generation = self.swapchain.?;
+        const new_generation = try SwapchainGeneration.create(self, old_generation.handle, old_generation.surface_format);
+        self.swapchain = new_generation;
+        old_generation.deinit(self);
 
         if (self.debug_ui_initialized) {
-            zgui.backend.set_min_image_count(self.swapchain.min_image_count);
-        }
-    }
-
-    fn createSwapchainDependents(self: *VulkanRenderer) !void {
-        const image_views = self.swapchain.image_views.?;
-
-        self.framebuffers = try self.allocator.alloc(vk.Framebuffer, image_views.len);
-        errdefer {
-            self.allocator.free(self.framebuffers.?);
-            self.framebuffers = null;
-        }
-
-        var framebuffer_count: usize = 0;
-        errdefer for (self.framebuffers.?[0..framebuffer_count]) |framebuffer| self.dev.destroyFramebuffer(framebuffer, null);
-
-        for (self.framebuffers.?, image_views) |*framebuffer_out, image_view| {
-            framebuffer_out.* = try self.dev.createFramebuffer(&.{
-                .render_pass = self.render_pass,
-                .attachment_count = 1,
-                .p_attachments = @ptrCast(&image_view),
-                .width = self.swapchain.extent.width,
-                .height = self.swapchain.extent.height,
-                .layers = 1,
-            }, null);
-            framebuffer_count += 1;
-        }
-
-        self.command_buffers = try self.allocator.alloc(vk.CommandBuffer, image_views.len);
-        errdefer {
-            self.allocator.free(self.command_buffers.?);
-            self.command_buffers = null;
-        }
-        try self.dev.allocateCommandBuffers(&.{
-            .command_pool = self.command_pool,
-            .level = .primary,
-            .command_buffer_count = @intCast(self.command_buffers.?.len),
-        }, self.command_buffers.?.ptr);
-
-        self.image_fences = try self.allocator.alloc(vk.Fence, image_views.len);
-        @memset(self.image_fences.?, .null_handle);
-    }
-
-    fn destroySwapchainDependents(self: *VulkanRenderer) void {
-        if (self.command_buffers) |command_buffers| {
-            if (self.command_pool != .null_handle) self.dev.freeCommandBuffers(self.command_pool, @intCast(command_buffers.len), command_buffers.ptr);
-            self.allocator.free(command_buffers);
-            self.command_buffers = null;
-        }
-        if (self.framebuffers) |framebuffers| {
-            for (framebuffers) |framebuffer| self.dev.destroyFramebuffer(framebuffer, null);
-            self.allocator.free(framebuffers);
-            self.framebuffers = null;
-        }
-        if (self.image_fences) |image_fences| {
-            self.allocator.free(image_fences);
-            self.image_fences = null;
+            zgui.backend.set_min_image_count(new_generation.min_image_count);
         }
     }
 
@@ -1225,28 +1122,138 @@ const Queue = struct {
     }
 };
 
-const SwapchainResources = struct {
-    handle: vk.SwapchainKHR = .null_handle,
-    surface_format: vk.SurfaceFormatKHR = undefined,
-    present_mode: vk.PresentModeKHR = .fifo_khr,
-    extent: vk.Extent2D = .{ .width = 0, .height = 0 },
-    min_image_count: u32 = 2,
-    image_views: ?[]vk.ImageView = null,
+const SwapchainGeneration = struct {
+    handle: vk.SwapchainKHR,
+    surface_format: vk.SurfaceFormatKHR,
+    present_mode: vk.PresentModeKHR,
+    extent: vk.Extent2D,
+    min_image_count: u32,
+    image_views: []vk.ImageView,
+    framebuffers: []vk.Framebuffer,
+    command_buffers: []vk.CommandBuffer,
+    image_fences: []vk.Fence,
 
-    fn destroyImageViews(self: *SwapchainResources, renderer: *VulkanRenderer) void {
-        if (self.image_views) |image_views| {
-            for (image_views) |view| renderer.dev.destroyImageView(view, null);
-            renderer.allocator.free(image_views);
-            self.image_views = null;
+    fn create(renderer: *VulkanRenderer, old_handle: vk.SwapchainKHR, surface_format: vk.SurfaceFormatKHR) !SwapchainGeneration {
+        const caps = try renderer.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(renderer.pdev, renderer.surface);
+        const extent = findActualExtent(caps, renderer.windowFramebufferExtent());
+        if (extent.width == 0 or extent.height == 0) return error.InvalidSurfaceDimensions;
+
+        const supported_format = try findSurfaceFormat(renderer, renderer.allocator, surface_format);
+        const present_mode = try findPresentMode(renderer, renderer.allocator);
+
+        var image_count = caps.min_image_count + 1;
+        if (caps.max_image_count > 0) image_count = @min(image_count, caps.max_image_count);
+
+        const qfi = [_]u32{ renderer.graphics_queue.family, renderer.present_queue.family };
+        const sharing_mode: vk.SharingMode = if (renderer.graphics_queue.family != renderer.present_queue.family) .concurrent else .exclusive;
+        const concurrent = sharing_mode == .concurrent;
+
+        const handle = try renderer.dev.createSwapchainKHR(&.{
+            .surface = renderer.surface,
+            .min_image_count = image_count,
+            .image_format = supported_format.format,
+            .image_color_space = supported_format.color_space,
+            .image_extent = extent,
+            .image_array_layers = 1,
+            .image_usage = .{ .color_attachment_bit = true },
+            .image_sharing_mode = sharing_mode,
+            .queue_family_index_count = if (concurrent) qfi.len else 0,
+            .p_queue_family_indices = if (concurrent) &qfi else undefined,
+            .pre_transform = caps.current_transform,
+            .composite_alpha = .{ .opaque_bit_khr = true },
+            .present_mode = present_mode,
+            .clipped = .true,
+            .old_swapchain = old_handle,
+        }, null);
+        errdefer renderer.dev.destroySwapchainKHR(handle, null);
+
+        const images = try renderer.dev.getSwapchainImagesAllocKHR(handle, renderer.allocator);
+        defer renderer.allocator.free(images);
+
+        const image_views = try renderer.allocator.alloc(vk.ImageView, images.len);
+        errdefer renderer.allocator.free(image_views);
+
+        var image_view_count: usize = 0;
+        errdefer for (image_views[0..image_view_count]) |view| renderer.dev.destroyImageView(view, null);
+
+        for (images, image_views) |image, *view_out| {
+            view_out.* = try renderer.dev.createImageView(&.{
+                .image = image,
+                .view_type = .@"2d",
+                .format = supported_format.format,
+                .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+                .subresource_range = .{
+                    .aspect_mask = .{ .color_bit = true },
+                    .base_mip_level = 0,
+                    .level_count = 1,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+            }, null);
+            image_view_count += 1;
         }
+
+        const framebuffers = try renderer.allocator.alloc(vk.Framebuffer, image_views.len);
+        errdefer renderer.allocator.free(framebuffers);
+
+        var framebuffer_count: usize = 0;
+        errdefer for (framebuffers[0..framebuffer_count]) |framebuffer| renderer.dev.destroyFramebuffer(framebuffer, null);
+
+        for (framebuffers, image_views) |*framebuffer_out, image_view| {
+            framebuffer_out.* = try renderer.dev.createFramebuffer(&.{
+                .render_pass = renderer.render_pass,
+                .attachment_count = 1,
+                .p_attachments = @ptrCast(&image_view),
+                .width = extent.width,
+                .height = extent.height,
+                .layers = 1,
+            }, null);
+            framebuffer_count += 1;
+        }
+
+        const command_buffers = try renderer.allocator.alloc(vk.CommandBuffer, image_views.len);
+        errdefer renderer.allocator.free(command_buffers);
+
+        try renderer.dev.allocateCommandBuffers(&.{
+            .command_pool = renderer.command_pool,
+            .level = .primary,
+            .command_buffer_count = @intCast(command_buffers.len),
+        }, command_buffers.ptr);
+        errdefer renderer.dev.freeCommandBuffers(renderer.command_pool, @intCast(command_buffers.len), command_buffers.ptr);
+
+        const image_fences = try renderer.allocator.alloc(vk.Fence, image_views.len);
+        errdefer renderer.allocator.free(image_fences);
+        @memset(image_fences, .null_handle);
+
+        return .{
+            .handle = handle,
+            .surface_format = supported_format,
+            .present_mode = present_mode,
+            .extent = extent,
+            .min_image_count = @max(caps.min_image_count, 2),
+            .image_views = image_views,
+            .framebuffers = framebuffers,
+            .command_buffers = command_buffers,
+            .image_fences = image_fences,
+        };
     }
 
-    fn deinit(self: *SwapchainResources, renderer: *VulkanRenderer) void {
-        self.destroyImageViews(renderer);
-        if (self.handle != .null_handle) {
-            renderer.dev.destroySwapchainKHR(self.handle, null);
-            self.handle = .null_handle;
+    fn deinit(self: *SwapchainGeneration, renderer: *VulkanRenderer) void {
+        if (self.command_buffers.len > 0 and renderer.command_pool != .null_handle) {
+            renderer.dev.freeCommandBuffers(renderer.command_pool, @intCast(self.command_buffers.len), self.command_buffers.ptr);
         }
+        renderer.allocator.free(self.command_buffers);
+
+        for (self.framebuffers) |framebuffer| renderer.dev.destroyFramebuffer(framebuffer, null);
+        renderer.allocator.free(self.framebuffers);
+
+        renderer.allocator.free(self.image_fences);
+
+        for (self.image_views) |view| renderer.dev.destroyImageView(view, null);
+        renderer.allocator.free(self.image_views);
+
+        if (self.handle != .null_handle) renderer.dev.destroySwapchainKHR(self.handle, null);
+        self.* = undefined;
     }
 };
 
@@ -1416,17 +1423,21 @@ fn checkDeviceExtensionSupport(instance: Instance, pdev: vk.PhysicalDevice, allo
     return true;
 }
 
-fn findSurfaceFormat(renderer: *VulkanRenderer, allocator: std.mem.Allocator) !vk.SurfaceFormatKHR {
-    const preferred = vk.SurfaceFormatKHR{
+fn findSurfaceFormat(renderer: *VulkanRenderer, allocator: std.mem.Allocator, required: ?vk.SurfaceFormatKHR) !vk.SurfaceFormatKHR {
+    const default_preferred = vk.SurfaceFormatKHR{
         .format = .b8g8r8a8_srgb,
         .color_space = .srgb_nonlinear_khr,
     };
     const formats = try renderer.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(renderer.pdev, renderer.surface, allocator);
     defer allocator.free(formats);
 
+    const preferred = required orelse default_preferred;
+    if (formats.len == 1 and formats[0].format == .undefined) return preferred;
+
     for (formats) |format| {
         if (std.meta.eql(format, preferred)) return preferred;
     }
+    if (required != null) return error.SurfaceFormatUnavailable;
     return formats[0];
 }
 

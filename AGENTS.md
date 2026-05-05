@@ -9,3 +9,6 @@ with the raylib API in terms of what measurements and semantics are used for its
 We are trying to use https://github.com/zig-gamedev as much as we can. If we need to add a new feature
 That we don't currently have a library or module for check their libraries to see if anything they
 offer can help us out.
+
+When it comes to actually writing code we are going to follow the guidance of well known performance minded
+game programmers like Jonathan Blow and Casey Muratori. We will have a focus on simplicity in our code.

@@ -40,17 +40,17 @@ pub const DebugUi = struct {
         zgui.deinit();
     }
 
-    pub fn draw(self: *DebugUi, renderer: anytype, framebuffer_size: anytype) void {
+    pub fn draw(self: *DebugUi, frame: anytype, framebuffer_size: anytype) void {
         self.tick(zglfw.getTime());
 
-        renderer.beginDebugUi(framebuffer_size.width, framebuffer_size.height);
+        frame.beginDebugUi(framebuffer_size.width, framebuffer_size.height);
         drawStatsWindow(.{
             .fps = self.fps,
             .average_cpu_time_ms = self.average_cpu_time_ms,
             .screen_width = framebuffer_size.width,
             .screen_height = framebuffer_size.height,
         });
-        renderer.endDebugUi();
+        frame.endDebugUi();
     }
 
     fn tick(self: *DebugUi, now_secs: f64) void {

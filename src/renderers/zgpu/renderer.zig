@@ -95,9 +95,124 @@ pub const ZgpuRenderer = struct {
     bitmap_font_sampler: wgpu.Sampler,
     rectangle_count: usize = 0,
     text_instance_count: usize = 0,
-    back_buffer_view: ?wgpu.TextureView = null,
-    encoder: ?wgpu.CommandEncoder = null,
-    pass: ?wgpu.RenderPassEncoder = null,
+
+    pub const Frame = struct {
+        renderer: *ZgpuRenderer,
+        back_buffer_view: wgpu.TextureView,
+        encoder: wgpu.CommandEncoder,
+        pass: wgpu.RenderPassEncoder,
+        ended: bool = false,
+
+        pub fn beginDebugUi(self: *Frame, screen_width: u32, screen_height: u32) void {
+            _ = self;
+            zgui.backend.newFrame(screen_width, screen_height);
+        }
+
+        pub fn endDebugUi(self: *Frame) void {
+            zgui.backend.draw(self.pass);
+        }
+
+        pub fn end(self: *Frame) void {
+            if (self.ended) return;
+            self.ended = true;
+
+            const renderer = self.renderer;
+            zgpu.endReleasePass(self.pass);
+
+            const commands = self.encoder.finish(null);
+
+            renderer.gctx.submit(&.{commands});
+            _ = renderer.gctx.present();
+
+            commands.release();
+            self.encoder.release();
+            self.back_buffer_view.release();
+        }
+
+        pub fn drawRectangle(self: *Frame, rectangle: Rectangle) void {
+            const renderer = self.renderer;
+            if (renderer.rectangle_count >= max_rectangles_per_frame) return;
+
+            const instance = rectangleInstance(rectangle);
+            const byte_offset = renderer.rectangle_count * @sizeOf(RectangleInstance);
+
+            renderer.gctx.queue.writeBuffer(renderer.rectangle_instance_buffer, byte_offset, RectangleInstance, &[_]RectangleInstance{instance});
+
+            self.pass.setPipeline(renderer.rectangle_pipeline);
+            self.pass.setBindGroup(0, renderer.frame_bind_group, null);
+            self.pass.setVertexBuffer(0, renderer.rectangle_instance_buffer, @intCast(byte_offset), @sizeOf(RectangleInstance));
+            self.pass.draw(quad_vertex_count, 1, 0, 0);
+
+            renderer.rectangle_count += 1;
+        }
+
+        pub fn drawText(self: *Frame, text: Text) void {
+            const renderer = self.renderer;
+            const view = std.unicode.Utf8View.init(text.text) catch return;
+            const start_instance = renderer.text_instance_count;
+            const color = colorComponents(text.color);
+            const scale_factor = text.size / renderer.bitmap_font.base_size;
+            const spacing = @trunc(scale_factor);
+
+            var iterator = view.iterator();
+            var text_offset_x: f32 = 0.0;
+            var text_offset_y: f32 = 0.0;
+
+            while (iterator.nextCodepoint()) |codepoint| {
+                if (codepoint == '\n') {
+                    text_offset_y += text.size + text_line_spacing;
+                    text_offset_x = 0.0;
+                    continue;
+                }
+
+                const glyph = renderer.bitmap_font.glyph(codepoint) orelse renderer.bitmap_font.glyph('?').?;
+
+                if ((codepoint != ' ') and (codepoint != '\t')) {
+                    if (renderer.text_instance_count >= max_text_glyphs_per_frame) break;
+                    renderer.text_instances[renderer.text_instance_count] = glyphInstance(
+                        .{
+                            .x = text.position.x + text_offset_x,
+                            .y = text.position.y + text_offset_y,
+                        },
+                        .{
+                            .x = glyph.width * scale_factor,
+                            .y = glyph.height * scale_factor,
+                        },
+                        glyph.atlas_bounds,
+                        renderer.bitmap_font.width,
+                        renderer.bitmap_font.height,
+                        color,
+                    );
+                    renderer.text_instance_count += 1;
+                }
+
+                text_offset_x += glyph.width * scale_factor + spacing;
+            }
+
+            self.drawTextInstances(start_instance);
+        }
+
+        fn drawTextInstances(self: *Frame, start_instance: usize) void {
+            const renderer = self.renderer;
+            const instance_count = renderer.text_instance_count - start_instance;
+            if (instance_count == 0) return;
+
+            const byte_offset = start_instance * @sizeOf(GlyphInstance);
+            const byte_count = instance_count * @sizeOf(GlyphInstance);
+            renderer.gctx.queue.writeBuffer(
+                renderer.text_instance_buffer,
+                byte_offset,
+                GlyphInstance,
+                renderer.text_instances[start_instance..renderer.text_instance_count],
+            );
+
+            self.pass.setPipeline(renderer.bitmap_text_pipeline);
+            self.pass.setBindGroup(0, renderer.frame_bind_group, null);
+            self.pass.setBindGroup(1, renderer.bitmap_text_bind_group, null);
+            self.pass.setVertexBuffer(0, renderer.text_instance_buffer, @intCast(byte_offset), byte_count);
+            self.pass.draw(quad_vertex_count, @intCast(instance_count), 0, 0);
+        }
+    };
 
     pub fn init(allocator: std.mem.Allocator, window: *zglfw.Window) !ZgpuRenderer {
         const gctx = try zgpu.GraphicsContext.create(
@@ -216,10 +331,6 @@ pub const ZgpuRenderer = struct {
         return self.gctx;
     }
 
-    pub fn currentRenderPass(self: *ZgpuRenderer) wgpu.RenderPassEncoder {
-        return self.pass.?;
-    }
-
     pub fn initDebugUi(self: *ZgpuRenderer, window: *zglfw.Window) !void {
         zgui.backend.init(
             window,
@@ -234,17 +345,8 @@ pub const ZgpuRenderer = struct {
         zgui.backend.deinit();
     }
 
-    pub fn beginDebugUi(self: *ZgpuRenderer, screen_width: u32, screen_height: u32) void {
-        _ = self;
-        zgui.backend.newFrame(screen_width, screen_height);
-    }
-
-    pub fn endDebugUi(self: *ZgpuRenderer) void {
-        zgui.backend.draw(self.currentRenderPass());
-    }
-
-    pub fn beginFrame(self: *ZgpuRenderer, clear_color: Color) bool {
-        if (!self.gctx.canRender()) return false;
+    pub fn beginFrame(self: *ZgpuRenderer, clear_color: Color) ?Frame {
+        if (!self.gctx.canRender()) return null;
 
         self.rectangle_count = 0;
         self.text_instance_count = 0;
@@ -256,9 +358,7 @@ pub const ZgpuRenderer = struct {
         const back_buffer_view = self.gctx.swapchain.getCurrentTextureView();
         const encoder = self.gctx.device.createCommandEncoder(null);
 
-        self.back_buffer_view = back_buffer_view;
-        self.encoder = encoder;
-        self.pass = zgpu.beginRenderPassSimple(
+        const pass = zgpu.beginRenderPassSimple(
             encoder,
             .clear,
             back_buffer_view,
@@ -267,107 +367,12 @@ pub const ZgpuRenderer = struct {
             null,
         );
 
-        return true;
-    }
-
-    pub fn endFrame(self: *ZgpuRenderer) void {
-        zgpu.endReleasePass(self.pass.?);
-
-        const commands = self.encoder.?.finish(null);
-
-        self.gctx.submit(&.{commands});
-        _ = self.gctx.present();
-
-        commands.release();
-        self.encoder.?.release();
-        self.back_buffer_view.?.release();
-
-        self.pass = null;
-        self.encoder = null;
-        self.back_buffer_view = null;
-    }
-
-    pub fn drawRectangle(self: *ZgpuRenderer, rectangle: Rectangle) void {
-        std.debug.assert(self.rectangle_count < max_rectangles_per_frame);
-
-        const instance = rectangleInstance(rectangle);
-        const byte_offset = self.rectangle_count * @sizeOf(RectangleInstance);
-
-        self.gctx.queue.writeBuffer(self.rectangle_instance_buffer, byte_offset, RectangleInstance, &[_]RectangleInstance{instance});
-
-        const pass = self.pass.?;
-        pass.setPipeline(self.rectangle_pipeline);
-        pass.setBindGroup(0, self.frame_bind_group, null);
-        pass.setVertexBuffer(0, self.rectangle_instance_buffer, @intCast(byte_offset), @sizeOf(RectangleInstance));
-        pass.draw(quad_vertex_count, 1, 0, 0);
-
-        self.rectangle_count += 1;
-    }
-
-    pub fn drawText(self: *ZgpuRenderer, text: Text) void {
-        const view = std.unicode.Utf8View.init(text.text) catch return;
-        const start_instance = self.text_instance_count;
-        const color = colorComponents(text.color);
-        const scale_factor = text.size / self.bitmap_font.base_size;
-        const spacing = @trunc(scale_factor);
-
-        var iterator = view.iterator();
-        var text_offset_x: f32 = 0.0;
-        var text_offset_y: f32 = 0.0;
-
-        while (iterator.nextCodepoint()) |codepoint| {
-            if (codepoint == '\n') {
-                text_offset_y += text.size + text_line_spacing;
-                text_offset_x = 0.0;
-                continue;
-            }
-
-            const glyph = self.bitmap_font.glyph(codepoint) orelse self.bitmap_font.glyph('?').?;
-
-            if ((codepoint != ' ') and (codepoint != '\t')) {
-                std.debug.assert(self.text_instance_count < max_text_glyphs_per_frame);
-                self.text_instances[self.text_instance_count] = glyphInstance(
-                    .{
-                        .x = text.position.x + text_offset_x,
-                        .y = text.position.y + text_offset_y,
-                    },
-                    .{
-                        .x = glyph.width * scale_factor,
-                        .y = glyph.height * scale_factor,
-                    },
-                    glyph.atlas_bounds,
-                    self.bitmap_font.width,
-                    self.bitmap_font.height,
-                    color,
-                );
-                self.text_instance_count += 1;
-            }
-
-            text_offset_x += glyph.width * scale_factor + spacing;
-        }
-
-        self.drawTextInstances(start_instance);
-    }
-
-    fn drawTextInstances(self: *ZgpuRenderer, start_instance: usize) void {
-        const instance_count = self.text_instance_count - start_instance;
-        if (instance_count == 0) return;
-
-        const byte_offset = start_instance * @sizeOf(GlyphInstance);
-        const byte_count = instance_count * @sizeOf(GlyphInstance);
-        self.gctx.queue.writeBuffer(
-            self.text_instance_buffer,
-            byte_offset,
-            GlyphInstance,
-            self.text_instances[start_instance..self.text_instance_count],
-        );
-
-        const pass = self.pass.?;
-        pass.setPipeline(self.bitmap_text_pipeline);
-        pass.setBindGroup(0, self.frame_bind_group, null);
-        pass.setBindGroup(1, self.bitmap_text_bind_group, null);
-        pass.setVertexBuffer(0, self.text_instance_buffer, @intCast(byte_offset), byte_count);
-        pass.draw(quad_vertex_count, @intCast(instance_count), 0, 0);
+        return .{
+            .renderer = self,
+            .back_buffer_view = back_buffer_view,
+            .encoder = encoder,
+            .pass = pass,
+        };
     }
 };
 

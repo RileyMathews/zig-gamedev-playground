@@ -27,23 +27,23 @@ pub fn main() !void {
     while (!window.shouldClose()) {
         zglfw.pollEvents();
 
-        if (!renderer.beginFrame(render.Color.white)) continue;
-        defer renderer.endFrame();
+        var frame = renderer.beginFrame(render.Color.white) orelse continue;
+        defer frame.end();
 
-        renderer.drawText(.{
+        frame.drawText(.{
             .text = glyph_demo_text,
             .position = .{ .x = 0, .y = 0 },
             .size = 48,
             .color = render.Color.black,
         });
 
-        renderer.drawRectangle(.{
+        frame.drawRectangle(.{
             .position = .{ .x = 0, .y = 48 },
             .size = .{ .x = 48, .y = 48 },
             .color = render.Color.blue,
         });
 
-        debug_ui_state.draw(&renderer, renderer.framebufferPixelSize());
+        debug_ui_state.draw(&frame, renderer.framebufferPixelSize());
     }
 }
 
