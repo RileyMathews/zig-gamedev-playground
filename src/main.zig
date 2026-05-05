@@ -29,7 +29,7 @@ pub fn main() !void {
         renderer.drawText(.{
             .text = glyph_demo_text,
             .position = .{ .x = 0, .y = 0 },
-            .size = 24,
+            .size = 48,
             .color = render.Color.black,
         });
 
