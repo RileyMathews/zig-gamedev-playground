@@ -1,8 +1,8 @@
 const std = @import("std");
 const zglfw = @import("zglfw");
 
-const render = @import("renderer.zig");
-const Renderer = render.Renderer;
+const render = @import("renderers/zgpu/renderer.zig");
+const ZgpuRenderer = render.ZgpuRenderer;
 
 pub fn main() !void {
     try zglfw.init();
@@ -14,7 +14,7 @@ pub fn main() !void {
     defer window.destroy();
 
     const allocator = std.heap.page_allocator;
-    var renderer = try Renderer.init(allocator, window);
+    var renderer = try ZgpuRenderer.init(allocator, window);
     defer renderer.deinit();
 
     var glyph_demo_buffer: [512]u8 = undefined;

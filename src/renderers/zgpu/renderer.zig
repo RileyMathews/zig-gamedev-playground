@@ -60,7 +60,7 @@ const max_text_glyphs_per_frame = 4096;
 const max_text_vertices_per_frame = text_vertex_count_per_glyph * max_text_glyphs_per_frame;
 const text_line_spacing: f32 = 2.0;
 
-pub const Renderer = struct {
+pub const ZgpuRenderer = struct {
     allocator: std.mem.Allocator,
     gctx: *zgpu.GraphicsContext,
     rectangle_pipeline: wgpu.RenderPipeline,
@@ -80,7 +80,7 @@ pub const Renderer = struct {
     encoder: ?wgpu.CommandEncoder = null,
     pass: ?wgpu.RenderPassEncoder = null,
 
-    pub fn init(allocator: std.mem.Allocator, window: *zglfw.Window) !Renderer {
+    pub fn init(allocator: std.mem.Allocator, window: *zglfw.Window) !ZgpuRenderer {
         const gctx = try zgpu.GraphicsContext.create(
             allocator,
             .{
@@ -147,7 +147,7 @@ pub const Renderer = struct {
         };
     }
 
-    pub fn deinit(self: *Renderer) void {
+    pub fn deinit(self: *ZgpuRenderer) void {
         self.allocator.free(self.text_vertices);
         self.bitmap_text_bind_group.release();
         self.bitmap_font_sampler.release();
@@ -161,14 +161,14 @@ pub const Renderer = struct {
         self.gctx.destroy(self.allocator);
     }
 
-    pub fn framebufferSize(self: *Renderer) Vec2 {
+    pub fn framebufferSize(self: *ZgpuRenderer) Vec2 {
         return .{
             .x = @floatFromInt(self.gctx.swapchain_descriptor.width),
             .y = @floatFromInt(self.gctx.swapchain_descriptor.height),
         };
     }
 
-    pub fn beginFrame(self: *Renderer, clear_color: Color) bool {
+    pub fn beginFrame(self: *ZgpuRenderer, clear_color: Color) bool {
         if (!self.gctx.canRender()) return false;
 
         self.rectangle_count = 0;
@@ -191,7 +191,7 @@ pub const Renderer = struct {
         return true;
     }
 
-    pub fn endFrame(self: *Renderer) void {
+    pub fn endFrame(self: *ZgpuRenderer) void {
         zgpu.endReleasePass(self.pass.?);
 
         const commands = self.encoder.?.finish(null);
@@ -208,7 +208,7 @@ pub const Renderer = struct {
         self.back_buffer_view = null;
     }
 
-    pub fn drawRectangle(self: *Renderer, rectangle: Rectangle) void {
+    pub fn drawRectangle(self: *ZgpuRenderer, rectangle: Rectangle) void {
         std.debug.assert(self.rectangle_count < max_rectangles_per_frame);
 
         const vertices = rectangleVertices(rectangle, self.framebufferSize());
@@ -225,7 +225,7 @@ pub const Renderer = struct {
         self.rectangle_count += 1;
     }
 
-    pub fn drawText(self: *Renderer, text: Text) void {
+    pub fn drawText(self: *ZgpuRenderer, text: Text) void {
         const view = std.unicode.Utf8View.init(text.text) catch return;
         const start_vertex = self.text_vertex_count;
         const framebuffer_size = self.framebufferSize();
@@ -273,7 +273,7 @@ pub const Renderer = struct {
         self.drawTextVertices(start_vertex, self.bitmap_text_pipeline, self.bitmap_text_bind_group);
     }
 
-    fn drawTextVertices(self: *Renderer, start_vertex: usize, pipeline: wgpu.RenderPipeline, bind_group: wgpu.BindGroup) void {
+    fn drawTextVertices(self: *ZgpuRenderer, start_vertex: usize, pipeline: wgpu.RenderPipeline, bind_group: wgpu.BindGroup) void {
         const vertex_count = self.text_vertex_count - start_vertex;
         if (vertex_count == 0) return;
 
