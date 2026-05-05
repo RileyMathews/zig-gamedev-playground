@@ -35,9 +35,9 @@ pub fn main() !void {
             .color = render.Color.blue,
         });
         renderer.drawText(.{
-            .text = "MSDF text rendering",
-            .position = .{ .x = 24, .y = 24 },
-            .size = 32,
+            .text = "Testing",
+            .position = .{ .x = 0, .y = 0 },
+            .size = 800,
             .color = render.Color.red,
         });
     }
