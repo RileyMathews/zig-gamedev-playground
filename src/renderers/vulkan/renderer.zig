@@ -404,14 +404,6 @@ pub const VulkanRenderer = struct {
         }
     }
 
-    pub fn framebufferSize(self: *VulkanRenderer) Vec2 {
-        const swapchain = self.swapchain.?;
-        return .{
-            .x = @floatFromInt(swapchain.extent.width),
-            .y = @floatFromInt(swapchain.extent.height),
-        };
-    }
-
     pub fn framebufferPixelSize(self: *VulkanRenderer) FramebufferPixelSize {
         const swapchain = self.swapchain.?;
         return .{
