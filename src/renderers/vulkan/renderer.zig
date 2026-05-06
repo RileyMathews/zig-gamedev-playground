@@ -130,8 +130,8 @@ const GlyphInstance = extern struct {
 };
 
 const quad_vertex_count = 6;
-const max_rectangles_per_frame = 1024;
-const max_text_glyphs_per_frame = 4096;
+const max_rectangles_per_frame = 64 * 1024;
+const max_text_glyphs_per_frame = 64 * 4096;
 const text_line_spacing: f32 = 2.0;
 
 const app_name = "zig-gamedev playground";

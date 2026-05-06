@@ -5,10 +5,10 @@ const debug_ui = @import("debug_ui.zig");
 const render = @import("renderer");
 const Renderer = render.Renderer;
 
-const world_width = 8;
-const world_height = 8;
+const world_width = 10;
+const world_height = 10;
 const tile_size = 64;
-const tile_text_size = 24;
+const tile_text_size = 16;
 
 const TileCoord = struct {
     x: usize,
