@@ -127,7 +127,6 @@ pub const VulkanRenderer = struct {
 
     rectangle_instance_buffers: [max_frames_in_flight]BufferResource = [_]BufferResource{.{}} ** max_frames_in_flight,
     text_instance_buffers: [max_frames_in_flight]BufferResource = [_]BufferResource{.{}} ** max_frames_in_flight,
-    bitmap_font: BitmapFont = undefined,
     bitmap_font_texture: FontTextureResources = .{},
 
     rectangle_count: usize = 0,
@@ -174,7 +173,7 @@ pub const VulkanRenderer = struct {
             const instance_buffer = &renderer.text_instance_buffers[self.frame_index];
             const mapped_instances: [*]GlyphInstance = @ptrCast(@alignCast(instance_buffer.mapped.?));
             const color = colorComponents(text.color);
-            const scale_factor = text.size / renderer.bitmap_font.base_size;
+            const scale_factor = text.size / monogram_font.base_size;
             const spacing = @trunc(scale_factor);
 
             var iterator = view.iterator();
@@ -188,7 +187,7 @@ pub const VulkanRenderer = struct {
                     continue;
                 }
 
-                const glyph = renderer.bitmap_font.glyph(codepoint) orelse renderer.bitmap_font.glyph('?').?;
+                const glyph = bitmapGlyph(codepoint) orelse bitmapGlyph('?').?;
 
                 if ((codepoint != ' ') and (codepoint != '\t')) {
                     if (renderer.text_instance_count >= max_text_glyphs_per_frame) break;
@@ -202,8 +201,8 @@ pub const VulkanRenderer = struct {
                             .y = glyph.height * scale_factor,
                         },
                         glyph.atlas_bounds,
-                        renderer.bitmap_font.width,
-                        renderer.bitmap_font.height,
+                        monogram_font.texture_width,
+                        monogram_font.texture_height,
                         color,
                     );
                     renderer.text_instance_count += 1;
@@ -364,7 +363,6 @@ pub const VulkanRenderer = struct {
                 true,
             );
         }
-        self.bitmap_font = BitmapFont.init();
         self.bitmap_font_texture = try self.createBitmapFontTextureResources();
         self.text_descriptor_set = try self.createTextDescriptorSet();
 
@@ -939,22 +937,22 @@ pub const VulkanRenderer = struct {
     }
 
     fn createBitmapFontTextureResources(self: *VulkanRenderer) !FontTextureResources {
-        const width = default_font_texture_width;
-        const height = default_font_texture_height;
+        const width = monogram_font.texture_width;
+        const height = monogram_font.texture_height;
         const pixel_count: usize = width * height;
-        std.debug.assert(default_font_data.len == default_font_glyph_count);
-        std.debug.assert(default_font_data[0].len == default_font_glyph_height);
+        std.debug.assert(monogram_font.data.len == monogram_font.glyph_count);
+        std.debug.assert(monogram_font.data[0].len == monogram_font.glyph_height);
 
         const rgba_pixels = try self.allocator.alloc(u8, pixel_count * 4);
         defer self.allocator.free(rgba_pixels);
         @memset(rgba_pixels, 0);
 
-        for (default_font_data, 0..) |glyph_rows, glyph_index| {
-            const atlas_x = default_font_glyph_padding + (glyph_index % default_font_glyphs_per_row) * default_font_glyph_stride_x;
-            const atlas_y = default_font_glyph_padding + (glyph_index / default_font_glyphs_per_row) * default_font_glyph_stride_y;
+        for (monogram_font.data, 0..) |glyph_rows, glyph_index| {
+            const atlas_x = monogram_font.glyph_padding + (glyph_index % monogram_font.glyphs_per_row) * monogram_font.glyph_stride_x;
+            const atlas_y = monogram_font.glyph_padding + (glyph_index / monogram_font.glyphs_per_row) * monogram_font.glyph_stride_y;
 
             for (glyph_rows, 0..) |bits, row| {
-                for (0..default_font_glyph_width) |x| {
+                for (0..monogram_font.glyph_width) |x| {
                     const mask = @as(u8, 1) << @intCast(x);
                     const pixel_index = (atlas_y + row) * width + atlas_x + x;
                     const alpha: u8 = if ((bits & mask) != 0) 255 else 0;
@@ -1493,61 +1491,31 @@ const Bounds = struct {
     bottom: f32,
 };
 
-const default_font_texture_width = monogram_font.texture_width;
-const default_font_texture_height = monogram_font.texture_height;
-const default_font_first_codepoint = monogram_font.first_codepoint;
-const default_font_glyph_count = monogram_font.glyph_count;
-const default_font_base_size = monogram_font.base_size;
-const default_font_glyph_width = monogram_font.glyph_width;
-const default_font_glyph_height = monogram_font.glyph_height;
-const default_font_glyph_padding = monogram_font.glyph_padding;
-const default_font_glyphs_per_row = monogram_font.glyphs_per_row;
-const default_font_glyph_stride_x = monogram_font.glyph_stride_x;
-const default_font_glyph_stride_y = monogram_font.glyph_stride_y;
-const default_font_glyph_rows = monogram_font.glyph_rows;
-const default_font_data = monogram_font.data;
-
 const BitmapGlyph = struct {
     atlas_bounds: Bounds,
     width: f32,
     height: f32,
 };
 
-const BitmapFont = struct {
-    glyphs: [default_font_glyph_count]BitmapGlyph,
-    width: f32 = default_font_texture_width,
-    height: f32 = default_font_texture_height,
-    base_size: f32 = default_font_base_size,
+fn bitmapGlyph(codepoint: u21) ?BitmapGlyph {
+    if (codepoint < monogram_font.first_codepoint) return null;
+    const glyph_index = codepoint - monogram_font.first_codepoint;
+    if (glyph_index >= monogram_font.glyph_count) return null;
 
-    fn init() BitmapFont {
-        var glyphs: [default_font_glyph_count]BitmapGlyph = undefined;
+    const x = monogram_font.glyph_padding + (glyph_index % monogram_font.glyphs_per_row) * monogram_font.glyph_stride_x;
+    const y = monogram_font.glyph_padding + (glyph_index / monogram_font.glyphs_per_row) * monogram_font.glyph_stride_y;
 
-        for (&glyphs, 0..) |*glyph_out, glyph_index| {
-            const x = default_font_glyph_padding + (glyph_index % default_font_glyphs_per_row) * default_font_glyph_stride_x;
-            const y = default_font_glyph_padding + (glyph_index / default_font_glyphs_per_row) * default_font_glyph_stride_y;
-
-            glyph_out.* = .{
-                .atlas_bounds = .{
-                    .left = @floatFromInt(x),
-                    .top = @floatFromInt(y),
-                    .right = @floatFromInt(x + default_font_glyph_width),
-                    .bottom = @floatFromInt(y + default_font_glyph_height),
-                },
-                .width = default_font_glyph_width,
-                .height = default_font_glyph_height,
-            };
-        }
-
-        return .{ .glyphs = glyphs };
-    }
-
-    fn glyph(self: *const BitmapFont, codepoint: u21) ?BitmapGlyph {
-        if (codepoint < default_font_first_codepoint) return null;
-        const index = codepoint - default_font_first_codepoint;
-        if (index >= default_font_glyph_count) return null;
-        return self.glyphs[index];
-    }
-};
+    return .{
+        .atlas_bounds = .{
+            .left = @floatFromInt(x),
+            .top = @floatFromInt(y),
+            .right = @floatFromInt(x + monogram_font.glyph_width),
+            .bottom = @floatFromInt(y + monogram_font.glyph_height),
+        },
+        .width = monogram_font.glyph_width,
+        .height = monogram_font.glyph_height,
+    };
+}
 
 fn glyphInstance(
     position: Vec2,
