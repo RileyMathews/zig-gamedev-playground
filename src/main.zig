@@ -21,8 +21,7 @@ pub fn main() !void {
     var debug_ui_state = try debug_ui.DebugUi.init(allocator, window, &renderer);
     defer debug_ui_state.deinit(&renderer);
 
-    var glyph_demo_buffer: [512]u8 = undefined;
-    const glyph_demo_text = buildGlyphDemoText(glyph_demo_buffer[0..]);
+    const tiles: [8]i32 = [8]i32{0, 1, 2, 3, 4, 5, 6, 7};
 
     while (!window.shouldClose()) {
         zglfw.pollEvents();
@@ -30,30 +29,29 @@ pub fn main() !void {
         var frame = renderer.beginFrame(render.Color.white) orelse continue;
         defer frame.end();
 
-        frame.drawText(.{
-            .text = glyph_demo_text,
-            .position = .{ .x = 0, .y = 0 },
-            .size = 48,
-            .color = render.Color.black,
-        });
+        for (tiles) |index| {
+            const tileRect: render.Rectangle = .{
+                .size = .{ .x = 48, .y = 48},
+                .position = .{ .x = @floatFromInt(index * 48), .y = 0},
+            };
+            frame.drawRectangle(.{
+                .rectangle = tileRect,
+                .color = if (@mod(index, 2) == 1) render.Color.red else render.Color.blue,
+            });
 
-        frame.drawRectangle(.{
-            .position = .{ .x = 0, .y = 48 },
-            .size = .{ .x = 48, .y = 48 },
-            .color = render.Color.blue,
-        });
+            var text_buf: [8]u8 = undefined;
+            const text = try std.fmt.bufPrint(&text_buf, "{d}", .{index});
+
+            const textSize = render.measureText(text, 42);
+
+            frame.drawText(.{
+                .text = text,
+                .size = 42,
+                .position = tileRect.centeredPosition(textSize)
+            });
+        }
 
         debug_ui_state.draw(&frame, renderer.framebufferPixelSize());
     }
 }
 
-fn buildGlyphDemoText(buffer: []u8) []const u8 {
-    var len: usize = 0;
-
-    for (32..256) |value| {
-        const codepoint: u21 = @intCast(value);
-        len += std.unicode.utf8Encode(codepoint, buffer[len..]) catch unreachable;
-    }
-
-    return buffer[0..len];
-}

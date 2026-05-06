@@ -55,6 +55,17 @@ pub const FramebufferPixelSize = struct {
 pub const Rectangle = struct {
     position: Vec2,
     size: Vec2,
+
+    pub fn centeredPosition(self: Rectangle, size: Vec2) Vec2 {
+        return .{
+            .x = self.position.x + (self.size.x - size.x) / 2.0,
+            .y = self.position.y + (self.size.y - size.y) / 2.0,
+        };
+    }
+};
+
+pub const DrawRectangle = struct {
+    rectangle: Rectangle,
     color: Color = Color.black,
 };
 
@@ -65,6 +76,38 @@ pub const Text = struct {
     size: f32 = 24.0,
     color: Color = Color.black,
 };
+
+pub fn measureText(text: []const u8, size: f32) Vec2 {
+    const view = std.unicode.Utf8View.init(text) catch return .{ .x = 0.0, .y = 0.0 };
+    const scale_factor = size / monogram_font.base_size;
+    const spacing = @trunc(scale_factor);
+
+    var iterator = view.iterator();
+    var max_width: f32 = 0.0;
+    var line_width: f32 = 0.0;
+    var height: f32 = if (text.len == 0) 0.0 else size;
+
+    while (iterator.nextCodepoint()) |codepoint| {
+        if (codepoint == '\n') {
+            max_width = @max(max_width, line_width);
+            line_width = 0.0;
+            height += size + text_line_spacing;
+            continue;
+        }
+
+        const glyph = bitmapGlyph(codepoint) orelse bitmapGlyph('?').?;
+
+        if (line_width > 0.0) {
+            line_width += spacing;
+        }
+        line_width += glyph.width * scale_factor;
+    }
+
+    return .{
+        .x = @max(max_width, line_width),
+        .y = height,
+    };
+}
 
 const FrameConstants = extern struct {
     framebuffer_size: [2]f32,
@@ -147,7 +190,7 @@ pub const VulkanRenderer = struct {
             zgui.backend.render(imguiHandle(self.command_buffer));
         }
 
-        pub fn drawRectangle(self: *Frame, rectangle: Rectangle) void {
+        pub fn drawRectangle(self: *Frame, rectangle: DrawRectangle) void {
             const renderer = self.renderer;
             if (self.rectangle_count >= max_rectangles_per_frame) return;
 
@@ -1485,10 +1528,10 @@ fn glyphInstance(
     };
 }
 
-fn rectangleInstance(rectangle: Rectangle) RectangleInstance {
+fn rectangleInstance(rectangle: DrawRectangle) RectangleInstance {
     return .{
-        .position = .{ rectangle.position.x, rectangle.position.y },
-        .size = .{ rectangle.size.x, rectangle.size.y },
+        .position = .{ rectangle.rectangle.position.x, rectangle.rectangle.position.y },
+        .size = .{ rectangle.rectangle.size.x, rectangle.rectangle.size.y },
         .color = colorComponents(rectangle.color),
     };
 }
