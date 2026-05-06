@@ -20,10 +20,10 @@ const text_frag_spv align(@alignOf(u32)) = @embedFile("text_fragment_shader").*;
 pub const Renderer = VulkanRenderer;
 
 pub const Color = struct {
-    r: f64,
-    g: f64,
-    b: f64,
-    a: f64,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
 
     pub const black: Color = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 };
     pub const white: Color = .{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 };
@@ -33,10 +33,10 @@ pub const Color = struct {
 
     fn toVkClear(self: Color) vk.ClearValue {
         return .{ .color = .{ .float_32 = .{
-            @floatCast(self.r),
-            @floatCast(self.g),
-            @floatCast(self.b),
-            @floatCast(self.a),
+            self.r,
+            self.g,
+            self.b,
+            self.a,
         } } };
     }
 };
@@ -1541,9 +1541,9 @@ fn rectangleInstance(rectangle: Rectangle) RectangleInstance {
 
 fn colorComponents(color: Color) [4]f32 {
     return .{
-        @floatCast(color.r),
-        @floatCast(color.g),
-        @floatCast(color.b),
-        @floatCast(color.a),
+        color.r,
+        color.g,
+        color.b,
+        color.a,
     };
 }
