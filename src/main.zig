@@ -5,6 +5,11 @@ const debug_ui = @import("debug_ui.zig");
 const render = @import("renderer");
 const Renderer = render.Renderer;
 
+const world_width = 8;
+const world_height = 8;
+const tile_size = 64;
+const tile_text_size = 24;
+
 pub fn main() !void {
     try zglfw.init();
     defer zglfw.terminate();
@@ -21,9 +26,7 @@ pub fn main() !void {
     var debug_ui_state = try debug_ui.DebugUi.init(allocator, window, &renderer);
     defer debug_ui_state.deinit(&renderer);
 
-    const tiles: [8]i32 = [8]i32{0, 1, 2, 3, 4, 5, 6, 7};
-
-    var show_debug_ui = true;
+    var show_debug_ui = false;
     var previous_f10 = zglfw.Action.release;
 
     while (!window.shouldClose()) {
@@ -38,26 +41,28 @@ pub fn main() !void {
         var frame = renderer.beginFrame(render.Color.white) orelse continue;
         defer frame.end();
 
-        for (tiles) |index| {
-            const tileRect: render.Rectangle = .{
-                .size = .{ .x = 48, .y = 48},
-                .position = .{ .x = @floatFromInt(index * 48), .y = 0},
-            };
-            frame.drawRectangle(.{
-                .rectangle = tileRect,
-                .color = if (@mod(index, 2) == 1) render.Color.red else render.Color.blue,
-            });
+        for (0..world_height) |y| {
+            for (0..world_width) |x| {
+                const tileRect: render.Rectangle = .{
+                    .size = .{ .x = tile_size, .y = tile_size},
+                    .position = .{ .x = @floatFromInt(x * tile_size), .y = @floatFromInt(y * tile_size)},
+                };
+                frame.drawRectangle(.{
+                    .rectangle = tileRect,
+                    .color = if (@mod(y * world_width + x, 2) == 1) render.Color.red else render.Color.blue,
+                });
 
-            var text_buf: [8]u8 = undefined;
-            const text = try std.fmt.bufPrint(&text_buf, "{d}", .{index});
+                var text_buf: [8]u8 = undefined;
+                const text = try std.fmt.bufPrint(&text_buf, "{d}/{d}", .{x + 1, y + 1});
 
-            const textSize = render.measureText(text, 42);
+                const textSize = render.measureText(text, tile_text_size);
 
-            frame.drawText(.{
-                .text = text,
-                .size = 42,
-                .position = tileRect.centeredPosition(textSize)
-            });
+                frame.drawText(.{
+                    .text = text,
+                    .size = tile_text_size,
+                    .position = tileRect.centeredPosition(textSize)
+                });
+            }
         }
 
         if (show_debug_ui) {
