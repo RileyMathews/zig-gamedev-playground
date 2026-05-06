@@ -1,6 +1,6 @@
 Right now this repo is mostly a POC that may evolve into a game idea.
 
-We are currently focused on trying to build out a solid architecture for a game loop with a semi hand rolled renderer based on zgpu.
+We are currently focused on trying to build out a solid architecture for a game loop with a semi hand rolled renderer using Vulkan as the backend.
 
 For the renderer layer I want the API for it to be inspired by the raylib API.
 We should follow more 'zig conventions' where applicable but we should broadly try to match up 

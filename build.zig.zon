@@ -36,18 +36,9 @@
             .url = "https://github.com/zig-gamedev/zglfw/archive/51003c105d23db378bb59ce415a387b22f1b0892.tar.gz",
             .hash = "zglfw-0.10.0-dev-zgVDNIy4IQDJNRy4jrP1As-SZxfJpuWhU1iJ-wBab_VD",
         },
-        .zgpu = .{
-            .url = "git+https://github.com/zig-gamedev/zgpu.git#c512b60c1f0cd438dcc6297083d0e3d91ad5e717",
-            .hash = "zgpu-0.12.0-dev-nqFT5OOmCABcwCeEje63Wohd7SqQ73CbPqZzmuqArpgF",
-        },
         .zgui = .{
             .url = "https://github.com/zig-gamedev/zgui/archive/ce016156a8520c438e886cd6c0b605e10ee7af3d.tar.gz",
             .hash = "zgui-0.6.0-dev--L6sZKkSbgCUBXLVfwJDPpMkETz7ll-mmQYQae-nMxjt",
-        },
-        .dawn_x86_64_linux_gnu = .{
-            .url = "https://github.com/michal-z/webgpu_dawn-x86_64-linux-gnu/archive/7d70db023bf254546024629cbec5ee6113e12a42.tar.gz",
-            .hash = "N-V-__8AAK7XUQNKNRnv1J6i189jtURJKjp3HTftoyD4Y4CB",
-            .lazy = true,
         },
         .system_sdk = .{
             .url = "https://github.com/zig-gamedev/system_sdk/archive/c0dbf11cdc17da5904ea8a17eadc54dee26567ec.tar.gz",
@@ -57,12 +48,10 @@
         .vulkan = .{
             .url = "git+https://github.com/Snektron/vulkan-zig#3ada9e2989bab70090a55f0f6fac19ea90d06357",
             .hash = "vulkan-0.0.0-r7Ytx6FIAwD3QyrrJhvObO0YSZ6WEkMGSCPKbhM__HFd",
-            .lazy = true,
         },
         .vulkan_headers = .{
             .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#8864cdc896bbc2a9b6eb36b3218fc9ef57908d77",
             .hash = "N-V-__8AAPnEbQK6L3hGtJefy0xZjeg7KOxIEj8_obZC2_lF",
-            .lazy = true,
         },
     },
     .paths = .{

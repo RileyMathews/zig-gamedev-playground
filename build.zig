@@ -1,11 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const RendererBackend = enum {
-    zgpu,
-    vulkan,
-};
-
 pub fn build(b: *std.Build) void {
     // Zig 0.15.x's native Linux target currently tries to link this machine's
     // GCC 16 crt1.o, whose .sframe relocations are not handled by Zig's linker.
@@ -13,7 +8,6 @@ pub fn build(b: *std.Build) void {
     // working while still allowing `-Dtarget=...` overrides.
     const target = b.standardTargetOptions(.{ .default_target = defaultTarget() });
     const optimize = b.standardOptimizeOption(.{});
-    const renderer_backend = b.option(RendererBackend, "renderer", "Renderer backend to build (default: zgpu)") orelse .zgpu;
 
     const exe = b.addExecutable(.{
         .name = "zig_gamedev_playground",
@@ -24,75 +18,41 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const vulkan_headers = if (renderer_backend == .vulkan)
-        b.lazyDependency("vulkan_headers", .{}) orelse @panic("vulkan_headers dependency is required for -Drenderer=vulkan")
-    else
-        null;
-    const vulkan = if (renderer_backend == .vulkan)
-        (b.lazyDependency("vulkan", .{
-            .registry = vulkan_headers.?.path("registry/vk.xml"),
-        }) orelse @panic("vulkan dependency is required for -Drenderer=vulkan")).module("vulkan-zig")
-    else
-        null;
+    const vulkan_headers = b.dependency("vulkan_headers", .{});
+    const vulkan = b.dependency("vulkan", .{
+        .registry = vulkan_headers.path("registry/vk.xml"),
+    }).module("vulkan-zig");
 
     const zglfw = b.dependency("zglfw", .{
         .target = target,
         .optimize = optimize,
-        .import_vulkan = renderer_backend == .vulkan,
+        .import_vulkan = true,
     });
     const zglfw_mod = zglfw.module("root");
-    if (vulkan) |vulkan_mod| {
-        zglfw_mod.addImport("vulkan", vulkan_mod);
-    }
+    zglfw_mod.addImport("vulkan", vulkan);
     exe.root_module.addImport("zglfw", zglfw_mod);
     if (target.result.os.tag != .emscripten) {
         exe.linkLibrary(zglfw.artifact("glfw"));
     }
 
-    const zgui = switch (renderer_backend) {
-        .zgpu => b.dependency("zgui", .{
-            .target = target,
-            .optimize = optimize,
-            .backend = .glfw_wgpu,
-        }),
-        .vulkan => b.dependency("zgui", .{
-            .target = target,
-            .optimize = optimize,
-            .backend = .glfw_vulkan,
-            .vulkan_include = vulkan_headers.?.path("include").getPath2(b, null),
-        }),
-    };
+    const zgui = b.dependency("zgui", .{
+        .target = target,
+        .optimize = optimize,
+        .backend = .glfw_vulkan,
+        .vulkan_include = vulkan_headers.path("include").getPath2(b, null),
+    });
     exe.root_module.addImport("zgui", zgui.module("root"));
     exe.linkLibrary(zgui.artifact("imgui"));
 
     const renderer_mod = b.createModule(.{
-        .root_source_file = b.path(switch (renderer_backend) {
-            .zgpu => "src/renderers/zgpu/renderer.zig",
-            .vulkan => "src/renderers/vulkan/renderer.zig",
-        }),
+        .root_source_file = b.path("src/renderers/vulkan/renderer.zig"),
         .target = target,
         .optimize = optimize,
     });
     renderer_mod.addImport("zglfw", zglfw_mod);
     renderer_mod.addImport("zgui", zgui.module("root"));
-
-    switch (renderer_backend) {
-        .zgpu => {
-            const zgpu = b.dependency("zgpu", .{
-                .target = target,
-                .optimize = optimize,
-            });
-            const zgpu_mod = zgpu.module("root");
-            exe.root_module.addImport("zgpu", zgpu_mod);
-            renderer_mod.addImport("zgpu", zgpu_mod);
-            @import("zgpu").addLibraryPathsTo(exe);
-            exe.linkLibrary(zgpu.artifact("zdawn"));
-        },
-        .vulkan => {
-            renderer_mod.addImport("vulkan", vulkan.?);
-            addVulkanShaders(b, renderer_mod);
-        },
-    }
+    renderer_mod.addImport("vulkan", vulkan);
+    addVulkanShaders(b, renderer_mod);
 
     exe.root_module.addImport("renderer", renderer_mod);
 
