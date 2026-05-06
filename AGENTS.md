@@ -10,5 +10,8 @@ We are trying to use https://github.com/zig-gamedev as much as we can. If we nee
 That we don't currently have a library or module for check their libraries to see if anything they
 offer can help us out.
 
+Don't treat the API of the renderer as sacred though. If alterations to its API can give us huge wins
+in simplicity, reducing overall lines of code, or performance then feel free to suggest changes to the renderer API.
+
 When it comes to actually writing code we are going to follow the guidance of well known performance minded
 game programmers like Jonathan Blow and Casey Muratori. We will have a focus on simplicity in our code.
