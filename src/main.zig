@@ -23,8 +23,17 @@ pub fn main() !void {
 
     const tiles: [8]i32 = [8]i32{0, 1, 2, 3, 4, 5, 6, 7};
 
+    var show_debug_ui = true;
+    var previous_f10 = zglfw.Action.release;
+
     while (!window.shouldClose()) {
         zglfw.pollEvents();
+        const f10 = window.getKey(.F10);
+
+        if (f10 == .press and previous_f10 == .release) {
+            show_debug_ui = !show_debug_ui;
+        }
+        previous_f10 = f10;
 
         var frame = renderer.beginFrame(render.Color.white) orelse continue;
         defer frame.end();
@@ -51,7 +60,9 @@ pub fn main() !void {
             });
         }
 
-        debug_ui_state.draw(&frame, renderer.framebufferPixelSize());
+        if (show_debug_ui) {
+            debug_ui_state.draw(&frame, renderer.framebufferPixelSize());
+        }
     }
 }
 
