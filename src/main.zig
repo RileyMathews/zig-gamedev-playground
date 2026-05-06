@@ -29,9 +29,15 @@ pub fn main() !void {
     var show_debug_ui = false;
     var previous_f10 = zglfw.Action.release;
 
+    var frame_arena = std.heap.ArenaAllocator.init(allocator);
+    const frame_allocator = frame_arena.allocator();
+
     while (!window.shouldClose()) {
+        _ = frame_arena.reset(.retain_capacity);
         zglfw.pollEvents();
         const f10 = window.getKey(.F10);
+
+        const mouse_pos_raw = window.getCursorPos();
 
         if (f10 == .press and previous_f10 == .release) {
             show_debug_ui = !show_debug_ui;
@@ -40,6 +46,13 @@ pub fn main() !void {
 
         var frame = renderer.beginFrame(render.Color.white) orelse continue;
         defer frame.end();
+
+        const pos_text = try std.fmt.allocPrint(frame_allocator, "{d}/{d}", .{mouse_pos_raw[0], mouse_pos_raw[1]});
+        frame.drawText(.{
+            .text = pos_text,
+            .size = 48,
+            .position = .{ .x = 600, .y = 600},
+        });
 
         for (0..world_height) |y| {
             for (0..world_width) |x| {
@@ -52,9 +65,7 @@ pub fn main() !void {
                     .color = if (@mod(y * world_width + x, 2) == 1) render.Color.red else render.Color.blue,
                 });
 
-                var text_buf: [8]u8 = undefined;
-                const text = try std.fmt.bufPrint(&text_buf, "{d}/{d}", .{x + 1, y + 1});
-
+                const text = try std.fmt.allocPrint(frame_allocator, "{d}/{d}", .{x + 1, y + 1});
                 const textSize = render.measureText(text, tile_text_size);
 
                 frame.drawText(.{
