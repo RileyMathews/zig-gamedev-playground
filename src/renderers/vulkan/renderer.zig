@@ -104,7 +104,6 @@ pub const VulkanRenderer = struct {
     has_device: bool = false,
     surface: vk.SurfaceKHR = .null_handle,
     pdev: vk.PhysicalDevice = .null_handle,
-    props: vk.PhysicalDeviceProperties = undefined,
     mem_props: vk.PhysicalDeviceMemoryProperties = undefined,
     graphics_queue: Queue = .{},
     present_queue: Queue = .{},
@@ -313,7 +312,7 @@ pub const VulkanRenderer = struct {
         };
         errdefer self.deinit();
 
-        const instance_handle = try createInstance(&self.vkb, allocator);
+        const instance_handle = try createInstance(&self.vkb);
         const vki = try allocator.create(InstanceWrapper);
         vki.* = InstanceWrapper.load(instance_handle, self.vkb.dispatch.vkGetInstanceProcAddr.?);
         self.instance = Instance.init(instance_handle, vki);
@@ -323,7 +322,6 @@ pub const VulkanRenderer = struct {
 
         const candidate = try pickPhysicalDevice(self.instance, allocator, self.surface);
         self.pdev = candidate.pdev;
-        self.props = candidate.props;
 
         const device_handle = try initializeDevice(self.instance, candidate);
         const vkd = try allocator.create(DeviceWrapper);
@@ -1125,7 +1123,6 @@ const Queue = struct {
 const SwapchainGeneration = struct {
     handle: vk.SwapchainKHR,
     surface_format: vk.SurfaceFormatKHR,
-    present_mode: vk.PresentModeKHR,
     extent: vk.Extent2D,
     min_image_count: u32,
     image_views: []vk.ImageView,
@@ -1228,7 +1225,6 @@ const SwapchainGeneration = struct {
         return .{
             .handle = handle,
             .surface_format = supported_format,
-            .present_mode = present_mode,
             .extent = extent,
             .min_image_count = @max(caps.min_image_count, 2),
             .image_views = image_views,
@@ -1289,11 +1285,8 @@ const FontTextureResources = struct {
     }
 };
 
-fn createInstance(vkb: *const BaseWrapper, allocator: std.mem.Allocator) !vk.Instance {
-    var extension_names: std.ArrayList([*:0]const u8) = .empty;
-    defer extension_names.deinit(allocator);
-
-    try extension_names.appendSlice(allocator, try zglfw.getRequiredInstanceExtensions());
+fn createInstance(vkb: *const BaseWrapper) !vk.Instance {
+    const extension_names = try zglfw.getRequiredInstanceExtensions();
 
     const app_info = vk.ApplicationInfo{
         .p_application_name = app_name,
@@ -1308,8 +1301,8 @@ fn createInstance(vkb: *const BaseWrapper, allocator: std.mem.Allocator) !vk.Ins
         .p_application_info = &app_info,
         .enabled_layer_count = 0,
         .pp_enabled_layer_names = undefined,
-        .enabled_extension_count = @intCast(extension_names.items.len),
-        .pp_enabled_extension_names = extension_names.items.ptr,
+        .enabled_extension_count = @intCast(extension_names.len),
+        .pp_enabled_extension_names = extension_names.ptr,
     }, null);
 }
 
@@ -1345,7 +1338,6 @@ fn initializeDevice(instance: Instance, candidate: DeviceCandidate) !vk.Device {
 
 const DeviceCandidate = struct {
     pdev: vk.PhysicalDevice,
-    props: vk.PhysicalDeviceProperties,
     queues: QueueAllocation,
 };
 
@@ -1372,7 +1364,6 @@ fn checkSuitable(instance: Instance, pdev: vk.PhysicalDevice, allocator: std.mem
     if (try allocateQueues(instance, pdev, allocator, surface)) |queues| {
         return .{
             .pdev = pdev,
-            .props = instance.getPhysicalDeviceProperties(pdev),
             .queues = queues,
         };
     }

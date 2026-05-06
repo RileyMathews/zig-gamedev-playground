@@ -11,7 +11,6 @@ pub const FrameStats = struct {
 };
 
 pub const DebugUi = struct {
-    previous_time: f64 = 0.0,
     fps_refresh_time: f64 = 0.0,
     fps_counter: u32 = 0,
     fps: f64 = 0.0,
@@ -29,7 +28,6 @@ pub const DebugUi = struct {
 
         const now = zglfw.getTime();
         return .{
-            .previous_time = now,
             .fps_refresh_time = now,
         };
     }
@@ -54,8 +52,6 @@ pub const DebugUi = struct {
     }
 
     fn tick(self: *DebugUi, now_secs: f64) void {
-        self.previous_time = now_secs;
-
         if ((now_secs - self.fps_refresh_time) >= 1.0) {
             const elapsed = now_secs - self.fps_refresh_time;
             self.fps = @as(f64, @floatFromInt(self.fps_counter)) / elapsed;
