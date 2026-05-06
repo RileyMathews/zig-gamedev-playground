@@ -118,10 +118,9 @@ pub const VulkanRenderer = struct {
     current_frame: usize = 0,
     fatal_render_error: bool = false,
 
-    rectangle_pipeline_layout: vk.PipelineLayout = .null_handle,
+    pipeline_layout: vk.PipelineLayout = .null_handle,
     rectangle_pipeline: vk.Pipeline = .null_handle,
     text_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
-    text_pipeline_layout: vk.PipelineLayout = .null_handle,
     text_pipeline: vk.Pipeline = .null_handle,
     text_descriptor_pool: vk.DescriptorPool = .null_handle,
     text_descriptor_set: vk.DescriptorSet = .null_handle,
@@ -288,7 +287,7 @@ pub const VulkanRenderer = struct {
             renderer.dev.cmdBindDescriptorSets(
                 self.command_buffer,
                 .graphics,
-                renderer.text_pipeline_layout,
+                renderer.pipeline_layout,
                 0,
                 1,
                 @ptrCast(&renderer.text_descriptor_set),
@@ -343,18 +342,9 @@ pub const VulkanRenderer = struct {
         self.swapchain = try SwapchainGeneration.create(&self, .null_handle, surface_format);
         try self.createSyncObjects();
 
-        const frame_constants_range = framePushConstantRange();
-        self.rectangle_pipeline_layout = try self.dev.createPipelineLayout(&.{
-            .flags = .{},
-            .set_layout_count = 0,
-            .p_set_layouts = undefined,
-            .push_constant_range_count = 1,
-            .p_push_constant_ranges = @ptrCast(&frame_constants_range),
-        }, null);
-        self.rectangle_pipeline = try self.createRectanglePipeline();
-
         self.text_descriptor_set_layout = try self.createTextDescriptorSetLayout();
-        self.text_pipeline_layout = try self.createTextPipelineLayout();
+        self.pipeline_layout = try self.createPipelineLayout();
+        self.rectangle_pipeline = try self.createRectanglePipeline();
         self.text_pipeline = try self.createTextPipeline();
         self.text_descriptor_pool = try self.createTextDescriptorPool();
 
@@ -393,10 +383,9 @@ pub const VulkanRenderer = struct {
 
         if (self.text_descriptor_pool != .null_handle) self.dev.destroyDescriptorPool(self.text_descriptor_pool, null);
         if (self.text_pipeline != .null_handle) self.dev.destroyPipeline(self.text_pipeline, null);
-        if (self.text_pipeline_layout != .null_handle) self.dev.destroyPipelineLayout(self.text_pipeline_layout, null);
-        if (self.text_descriptor_set_layout != .null_handle) self.dev.destroyDescriptorSetLayout(self.text_descriptor_set_layout, null);
         if (self.rectangle_pipeline != .null_handle) self.dev.destroyPipeline(self.rectangle_pipeline, null);
-        if (self.rectangle_pipeline_layout != .null_handle) self.dev.destroyPipelineLayout(self.rectangle_pipeline_layout, null);
+        if (self.pipeline_layout != .null_handle) self.dev.destroyPipelineLayout(self.pipeline_layout, null);
+        if (self.text_descriptor_set_layout != .null_handle) self.dev.destroyDescriptorSetLayout(self.text_descriptor_set_layout, null);
 
         self.destroySyncObjects();
         if (self.swapchain) |*swapchain| {
@@ -563,7 +552,7 @@ pub const VulkanRenderer = struct {
         } };
         self.dev.cmdPushConstants(
             command_buffer,
-            self.rectangle_pipeline_layout,
+            self.pipeline_layout,
             .{ .vertex_bit = true },
             0,
             @sizeOf(FrameConstants),
@@ -722,7 +711,7 @@ pub const VulkanRenderer = struct {
         return try self.createGraphicsPipeline(
             rectangle_vert_spv[0..],
             rectangle_frag_spv[0..],
-            self.rectangle_pipeline_layout,
+            self.pipeline_layout,
             binding,
             attributes[0..],
             false,
@@ -745,7 +734,7 @@ pub const VulkanRenderer = struct {
         }, null);
     }
 
-    fn createTextPipelineLayout(self: *VulkanRenderer) !vk.PipelineLayout {
+    fn createPipelineLayout(self: *VulkanRenderer) !vk.PipelineLayout {
         const frame_constants_range = framePushConstantRange();
         return try self.dev.createPipelineLayout(&.{
             .flags = .{},
@@ -773,7 +762,7 @@ pub const VulkanRenderer = struct {
         return try self.createGraphicsPipeline(
             text_vert_spv[0..],
             text_frag_spv[0..],
-            self.text_pipeline_layout,
+            self.pipeline_layout,
             binding,
             attributes[0..],
             true,
