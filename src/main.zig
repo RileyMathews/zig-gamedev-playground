@@ -10,6 +10,23 @@ const world_height = 8;
 const tile_size = 64;
 const tile_text_size = 24;
 
+const TileCoord = struct {
+    x: usize,
+    y: usize,
+};
+
+fn tileAtPosition(position: render.Vec2) ?TileCoord {
+    if (position.x < 0.0 or position.y < 0.0) return null;
+
+    const tile_size_float: f32 = @floatFromInt(tile_size);
+    const tile_x: usize = @intFromFloat(@floor(position.x / tile_size_float));
+    const tile_y: usize = @intFromFloat(@floor(position.y / tile_size_float));
+
+    if (tile_x >= world_width or tile_y >= world_height) return null;
+
+    return .{ .x = tile_x, .y = tile_y };
+}
+
 pub fn main() !void {
     try zglfw.init();
     defer zglfw.terminate();
@@ -38,6 +55,11 @@ pub fn main() !void {
         const f10 = window.getKey(.F10);
 
         const mouse_pos_raw = window.getCursorPos();
+        const mouse_pos: render.Vec2 = .{
+            .x = @floatCast(mouse_pos_raw[0]),
+            .y = @floatCast(mouse_pos_raw[1]),
+        };
+        const hover_tile = tileAtPosition(mouse_pos);
 
         if (f10 == .press and previous_f10 == .release) {
             show_debug_ui = !show_debug_ui;
@@ -47,38 +69,35 @@ pub fn main() !void {
         var frame = renderer.beginFrame(render.Color.white) orelse continue;
         defer frame.end();
 
-        const pos_text = try std.fmt.allocPrint(frame_allocator, "{d}/{d}", .{mouse_pos_raw[0], mouse_pos_raw[1]});
-        frame.drawText(.{
-            .text = pos_text,
-            .size = 48,
-            .position = .{ .x = 600, .y = 600},
-        });
-
         for (0..world_height) |y| {
             for (0..world_width) |x| {
-                const tileRect: render.Rectangle = .{
-                    .size = .{ .x = tile_size, .y = tile_size},
-                    .position = .{ .x = @floatFromInt(x * tile_size), .y = @floatFromInt(y * tile_size)},
+                const tile_rect: render.Rectangle = .{
+                    .size = .{ .x = tile_size, .y = tile_size },
+                    .position = .{ .x = @floatFromInt(x * tile_size), .y = @floatFromInt(y * tile_size) },
                 };
+                const is_hovered = if (hover_tile) |tile| tile.x == x and tile.y == y else false;
+
                 frame.drawRectangle(.{
-                    .rectangle = tileRect,
-                    .color = if (@mod(y * world_width + x, 2) == 1) render.Color.red else render.Color.blue,
+                    .rectangle = tile_rect,
+                    .color = if (is_hovered) render.Color.green else render.Color.brown,
                 });
 
-                const text = try std.fmt.allocPrint(frame_allocator, "{d}/{d}", .{x + 1, y + 1});
-                const textSize = render.measureText(text, tile_text_size);
+                if (show_debug_ui) {
+                    const text = try std.fmt.allocPrint(frame_allocator, "{d}/{d}", .{ x, y });
+                    const textSize = render.measureText(text, tile_text_size);
 
-                frame.drawText(.{
-                    .text = text,
-                    .size = tile_text_size,
-                    .position = tileRect.centeredPosition(textSize)
-                });
+                    frame.drawText(.{
+                        .text = text,
+                        .size = tile_text_size,
+                        .position = tile_rect.centeredPosition(textSize),
+                        .color = render.Color.pink,
+                    });
+                }
             }
         }
 
         if (show_debug_ui) {
-            debug_ui_state.draw(&frame, renderer.framebufferPixelSize());
+            debug_ui_state.draw(&frame, renderer.framebufferPixelSize(), mouse_pos_raw, hover_tile);
         }
     }
 }
-

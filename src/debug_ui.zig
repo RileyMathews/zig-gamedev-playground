@@ -8,6 +8,10 @@ pub const FrameStats = struct {
     average_cpu_time_ms: f64,
     screen_width: u32,
     screen_height: u32,
+    mouse_x: f64,
+    mouse_y: f64,
+    tile_x: ?usize,
+    tile_y: ?usize,
 };
 
 pub const DebugUi = struct {
@@ -38,7 +42,7 @@ pub const DebugUi = struct {
         zgui.deinit();
     }
 
-    pub fn draw(self: *DebugUi, frame: anytype, framebuffer_size: anytype) void {
+    pub fn draw(self: *DebugUi, frame: anytype, framebuffer_size: anytype, mouse_pos: anytype, hover_tile: anytype) void {
         self.tick(zglfw.getTime());
 
         frame.beginDebugUi(framebuffer_size.width, framebuffer_size.height);
@@ -47,6 +51,10 @@ pub const DebugUi = struct {
             .average_cpu_time_ms = self.average_cpu_time_ms,
             .screen_width = framebuffer_size.width,
             .screen_height = framebuffer_size.height,
+            .mouse_x = mouse_pos[0],
+            .mouse_y = mouse_pos[1],
+            .tile_x = if (hover_tile) |tile| tile.x else null,
+            .tile_y = if (hover_tile) |tile| tile.y else null,
         });
         frame.endDebugUi();
     }
@@ -73,6 +81,12 @@ fn drawStatsWindow(stats: FrameStats) void {
         zgui.text("Frame time: {d:.3} ms", .{stats.average_cpu_time_ms});
         zgui.separator();
         zgui.text("Screen: {d} x {d}", .{ stats.screen_width, stats.screen_height });
+        zgui.text("Mouse: {d:.1}, {d:.1}", .{ stats.mouse_x, stats.mouse_y });
+        if (stats.tile_x) |tile_x| {
+            zgui.text("Tile: {d}, {d}", .{ tile_x, stats.tile_y.? });
+        } else {
+            zgui.text("Tile: none", .{});
+        }
     }
     zgui.end();
 }

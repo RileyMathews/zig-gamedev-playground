@@ -30,6 +30,8 @@ pub const Color = struct {
     pub const red: Color = .{ .r = 1.0, .g = 0.0, .b = 0.0, .a = 1.0 };
     pub const green: Color = .{ .r = 0.0, .g = 1.0, .b = 0.0, .a = 1.0 };
     pub const blue: Color = .{ .r = 0.0, .g = 0.0, .b = 1.0, .a = 1.0 };
+    pub const brown: Color = .{ .r = 0.45, .g = 0.25, .b = 0.10, .a = 1.0 };
+    pub const pink: Color = .{ .r = 1.0, .g = 0.20, .b = 0.70, .a = 1.0 };
 
     fn toVkClear(self: Color) vk.ClearValue {
         return .{ .color = .{ .float_32 = .{
