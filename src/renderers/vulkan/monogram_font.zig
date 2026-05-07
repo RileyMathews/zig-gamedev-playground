@@ -1,5 +1,7 @@
 // Monogram pixel font data (CC0) by Vinicius Menezio, from monogram-bitmap.json.
-// The bitmap format stores each glyph as 12 rows of 6 high-to-low bits.
+// The bitmap format stores each glyph as 12 rows of 6 high-to-low bits. The
+// renderer expands these bits into a white RGBA texture atlas at startup, using
+// alpha as the mask that shapes tinted text in the fragment shader.
 pub const texture_width = 128;
 pub const texture_height = 256;
 pub const first_codepoint = 32;

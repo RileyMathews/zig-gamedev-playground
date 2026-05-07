@@ -12,6 +12,9 @@ const DeviceWrapper = vk.DeviceWrapper;
 const Instance = vk.InstanceProxy;
 const Device = vk.DeviceProxy;
 
+// build.zig compiles the GLSL shaders to SPIR-V and exposes those binary blobs
+// as anonymous imports. Vulkan consumes SPIR-V as 32-bit words, so keep the
+// embedded bytes aligned like u32 data.
 const rectangle_vert_spv align(@alignOf(u32)) = @embedFile("rectangle_vertex_shader").*;
 const rectangle_frag_spv align(@alignOf(u32)) = @embedFile("rectangle_fragment_shader").*;
 const text_vert_spv align(@alignOf(u32)) = @embedFile("text_vertex_shader").*;
@@ -33,6 +36,9 @@ pub const Color = struct {
     pub const brown: Color = .{ .r = 0.45, .g = 0.25, .b = 0.10, .a = 1.0 };
     pub const pink: Color = .{ .r = 1.0, .g = 0.20, .b = 0.70, .a = 1.0 };
 
+    // Render pass clear colors use Vulkan's ClearValue union rather than the
+    // renderer's public Color type.
+    // TODO: Should we align public API to just use same types?
     fn toVkClear(self: Color) vk.ClearValue {
         return .{ .color = .{ .float_32 = .{
             self.r,
@@ -86,6 +92,8 @@ pub const Text = struct {
     color: Color = Color.black,
 };
 
+/// CPU-side text measurement using the same bitmap glyph advances that drawText
+/// uses when it builds per-glyph GPU instances.
 pub fn measureText(text: []const u8, size: f32) Vec2 {
     const view = std.unicode.Utf8View.init(text) catch return .{ .x = 0.0, .y = 0.0 };
     const scale_factor = size / monogram_font.base_size;
@@ -118,16 +126,24 @@ pub fn measureText(text: []const u8, size: f32) Vec2 {
     };
 }
 
+// Small per-frame values used by every vertex shader. Push constants are a
+// Vulkan path for sending a few bytes directly with the command buffer, avoiding
+// a separate uniform buffer allocation for data that changes every frame.
 const FrameConstants = extern struct {
     framebuffer_size: [2]f32,
 };
 
+// Per-instance data is what changes for each drawn rectangle. The vertex shader
+// reuses the same six generated quad vertices for every instance and reads these
+// attributes to place/color each copy.
 const RectangleInstance = extern struct {
     position: [2]f32,
     size: [2]f32,
     color: [4]f32,
 };
 
+// Text is also drawn as instanced quads: one quad per visible glyph. uv_min and
+// uv_max select the glyph's rectangle inside the font atlas texture.
 const GlyphInstance = extern struct {
     position: [2]f32,
     size: [2]f32,
@@ -136,16 +152,23 @@ const GlyphInstance = extern struct {
     color: [4]f32,
 };
 
+// A draw range points at a contiguous span of instance-buffer entries. This lets
+// the renderer batch adjacent rectangles or glyphs into a single Vulkan draw.
 const DrawRange = struct {
     start: usize,
     count: usize,
 };
 
+// The command stream preserves CPU draw order while still grouping consecutive
+// draws of the same pipeline. That matters when rectangles and text overlap.
 const DrawCommand = union(enum) {
     rectangles: DrawRange,
     text: DrawRange,
 };
 
+// Each rectangle or glyph is drawn as two triangles. The vertex shader generates
+// the six corner positions from gl_VertexIndex, so no static quad vertex buffer
+// is needed.
 const quad_vertex_count = 6;
 const max_rectangles_per_frame = 64 * 1024;
 const max_text_glyphs_per_frame = 64 * 4096;
@@ -153,12 +176,17 @@ const max_draw_commands_per_frame = 64 * 1024;
 const text_line_spacing: f32 = 2.0;
 
 const app_name = "zig-gamedev playground";
+// Rendering to a window requires the swapchain extension. The swapchain is the
+// rotating set of images that Vulkan hands to us to draw into and then present.
 const required_device_extensions = [_][*:0]const u8{vk.extensions.khr_swapchain.name};
 
 pub const VulkanRenderer = struct {
     allocator: std.mem.Allocator,
     window: *zglfw.Window,
 
+    // Vulkan commands are loaded through dispatch tables. BaseWrapper knows how
+    // to load global functions, while Instance and Device proxies load functions
+    // whose availability depends on those handles.
     vkb: BaseWrapper,
     instance: Instance = undefined,
     dev: Device = undefined,
@@ -167,26 +195,42 @@ pub const VulkanRenderer = struct {
     surface: vk.SurfaceKHR = .null_handle,
     pdev: vk.PhysicalDevice = .null_handle,
     mem_props: vk.PhysicalDeviceMemoryProperties = undefined,
+    // Queue families are hardware/driver-defined groups of queues. Some queues
+    // can run graphics commands; some can present images to the window surface.
     graphics_queue: Queue = .{},
     present_queue: Queue = .{},
 
+    // A swapchain generation owns the window images and matching framebuffers
+    // for one size/format. Resizing the window creates a new generation.
     swapchain: ?SwapchainGeneration = null,
+    // The render pass describes how the swapchain image is used during a frame:
+    // clear it at the start, draw color into it, and leave it ready to present.
     render_pass: vk.RenderPass = .null_handle,
+    // This renderer records one primary command buffer per frame. The command
+    // pool owns the memory backing command buffers for the graphics queue family.
     command_pool: vk.CommandPool = .null_handle,
     command_buffer: vk.CommandBuffer = .null_handle,
 
+    // Semaphores order GPU work across queues; the fence lets the CPU wait until
+    // the previous use of the single command buffer has finished.
     image_available: vk.Semaphore = .null_handle,
     render_finished: vk.Semaphore = .null_handle,
     in_flight_fence: vk.Fence = .null_handle,
     fatal_render_error: bool = false,
 
+    // Pipelines bake shader programs plus fixed-function render state. Vulkan
+    // makes this explicit so drawing can be cheap once setup is complete.
     pipeline_layout: vk.PipelineLayout = .null_handle,
     rectangle_pipeline: vk.Pipeline = .null_handle,
+    // Text needs a sampled font texture, so it also needs descriptor objects.
+    // Descriptors are Vulkan's way to bind resources that shaders can access.
     text_descriptor_set_layout: vk.DescriptorSetLayout = .null_handle,
     text_pipeline: vk.Pipeline = .null_handle,
     text_descriptor_pool: vk.DescriptorPool = .null_handle,
     text_descriptor_set: vk.DescriptorSet = .null_handle,
 
+    // Instance buffers are persistently mapped CPU-visible memory. draw calls
+    // write rectangle/glyph data directly into them before recording GPU draws.
     rectangle_instance_buffer: BufferResource = .{},
     text_instance_buffer: BufferResource = .{},
     bitmap_font_texture: FontTextureResources = .{},
@@ -194,6 +238,8 @@ pub const VulkanRenderer = struct {
 
     debug_ui_initialized: bool = false,
 
+    // A Frame represents one acquired swapchain image plus the command buffer
+    // currently recording work for that image.
     pub const Frame = struct {
         renderer: *VulkanRenderer,
         image_index: u32,
@@ -204,6 +250,8 @@ pub const VulkanRenderer = struct {
         flushed_draw_command_count: usize = 0,
         ended: bool = false,
 
+        // ImGui/zgui emits Vulkan commands directly into the frame's command
+        // buffer. Flush queued game draws first so debug UI appears on top.
         pub fn beginDebugUi(self: *Frame, screen_width: u32, screen_height: u32) void {
             _ = self;
             zgui.backend.newFrame(screen_width, screen_height);
@@ -214,6 +262,8 @@ pub const VulkanRenderer = struct {
             zgui.backend.render(imguiHandle(self.command_buffer));
         }
 
+        // Public raylib-style call: append one rectangle to the mapped instance
+        // buffer and queue a draw command that will be emitted later.
         pub fn drawRectangle(self: *Frame, rectangle: DrawRectangle) void {
             const renderer = self.renderer;
             if (self.rectangle_count >= max_rectangles_per_frame) return;
@@ -225,6 +275,8 @@ pub const VulkanRenderer = struct {
             self.rectangle_count += 1;
         }
 
+        // Converts UTF-8 text into visible glyph instances. Spaces and tabs only
+        // advance the cursor; they do not need quads because they draw nothing.
         pub fn drawText(self: *Frame, text: Text) void {
             const renderer = self.renderer;
             const view = std.unicode.Utf8View.init(text.text) catch return;
@@ -277,6 +329,8 @@ pub const VulkanRenderer = struct {
             }
         }
 
+        // Finish recording the command buffer, submit it to the graphics queue,
+        // then present the rendered swapchain image to the window.
         pub fn end(self: *Frame) void {
             if (self.ended) return;
             self.ended = true;
@@ -297,6 +351,8 @@ pub const VulkanRenderer = struct {
                 return;
             };
 
+            // Wait until the acquired swapchain image is ready before the GPU
+            // starts color output, then signal render_finished when drawing ends.
             const wait_stage = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
             const submit_info = vk.SubmitInfo{
                 .wait_semaphore_count = 1,
@@ -315,6 +371,8 @@ pub const VulkanRenderer = struct {
             };
 
             const swapchain = renderer.swapchain.?;
+            // Present can report that the swapchain no longer matches the
+            // window. That is normal after resize/minimize events.
             const present_result = renderer.dev.queuePresentKHR(renderer.present_queue.handle, &.{
                 .wait_semaphore_count = 1,
                 .p_wait_semaphores = @ptrCast(&renderer.render_finished),
@@ -341,6 +399,9 @@ pub const VulkanRenderer = struct {
             const renderer = self.renderer;
             const commands = renderer.draw_commands.?;
 
+            // Commands can be flushed before the frame ends, for example before
+            // rendering debug UI. Keep the cursor so later flushes only emit new
+            // commands.
             while (self.flushed_draw_command_count < self.draw_command_count) {
                 const command = commands[self.flushed_draw_command_count];
                 switch (command) {
@@ -355,6 +416,8 @@ pub const VulkanRenderer = struct {
             const renderer = self.renderer;
             const commands = renderer.draw_commands.?;
 
+            // Consecutive rectangle calls can share one pipeline bind and one
+            // instanced draw, so extend the previous range when possible.
             if (self.draw_command_count > self.flushed_draw_command_count) {
                 const last = &commands[self.draw_command_count - 1];
                 switch (last.*) {
@@ -378,6 +441,8 @@ pub const VulkanRenderer = struct {
             const renderer = self.renderer;
             const commands = renderer.draw_commands.?;
 
+            // Text can also batch, but only while no other draw type has been
+            // inserted between glyph ranges. That preserves visual ordering.
             if (self.draw_command_count > self.flushed_draw_command_count) {
                 const last = &commands[self.draw_command_count - 1];
                 switch (last.*) {
@@ -405,6 +470,9 @@ pub const VulkanRenderer = struct {
             const instance_buffer = &renderer.rectangle_instance_buffer;
             const offset = [_]vk.DeviceSize{@intCast(byte_offset)};
 
+            // Bind the rectangle pipeline and the slice of instance data for
+            // this range. cmdDraw's instance count tells the GPU how many quads
+            // to generate from the same six vertices.
             renderer.dev.cmdBindPipeline(self.command_buffer, .graphics, renderer.rectangle_pipeline);
             renderer.dev.cmdBindVertexBuffers(self.command_buffer, 0, 1, @ptrCast(&instance_buffer.buffer), &offset);
             renderer.dev.cmdDraw(self.command_buffer, quad_vertex_count, @intCast(range.count), 0, 0);
@@ -416,6 +484,9 @@ pub const VulkanRenderer = struct {
 
             const byte_offset = range.start * @sizeOf(GlyphInstance);
 
+            // Text uses a different pipeline because the fragment shader samples
+            // the font atlas. Bind the descriptor set so that shader can see the
+            // atlas image and sampler.
             renderer.dev.cmdBindPipeline(self.command_buffer, .graphics, renderer.text_pipeline);
             renderer.dev.cmdBindDescriptorSets(
                 self.command_buffer,
@@ -434,6 +505,9 @@ pub const VulkanRenderer = struct {
         }
     };
 
+    /// Creates the Vulkan objects needed to draw rectangles and bitmap text into
+    /// the GLFW window. The setup order follows Vulkan's dependency chain:
+    /// instance -> surface/device -> swapchain/render pass -> pipelines/resources.
     pub fn init(allocator: std.mem.Allocator, window: *zglfw.Window) !VulkanRenderer {
         if (!zglfw.isVulkanSupported()) return error.VulkanUnavailable;
 
@@ -444,6 +518,8 @@ pub const VulkanRenderer = struct {
         };
         errdefer self.deinit();
 
+        // The Vulkan instance is the process-level connection to the loader and
+        // extensions needed by GLFW to create a window surface.
         const instance_handle = try createInstance(&self.vkb);
         const vki = try allocator.create(InstanceWrapper);
         vki.* = InstanceWrapper.load(instance_handle, self.vkb.dispatch.vkGetInstanceProcAddr.?);
@@ -452,6 +528,8 @@ pub const VulkanRenderer = struct {
 
         try zglfw.createWindowSurface(self.instance.handle, window, null, &self.surface);
 
+        // A physical device is the actual GPU/driver. The logical device is the
+        // application's connection to that GPU, including the queues we will use.
         const candidate = try pickPhysicalDevice(self.instance, allocator, self.surface);
         self.pdev = candidate.pdev;
 
@@ -465,6 +543,8 @@ pub const VulkanRenderer = struct {
         self.present_queue = Queue.init(self.dev, candidate.queues.present_family);
         self.mem_props = self.instance.getPhysicalDeviceMemoryProperties(self.pdev);
 
+        // Render pass and swapchain must agree on the image format that the
+        // window system will present.
         const surface_format = try findSurfaceFormat(&self, allocator, null);
         self.render_pass = try self.createRenderPass(surface_format.format);
         self.command_pool = try self.dev.createCommandPool(&.{
@@ -480,12 +560,17 @@ pub const VulkanRenderer = struct {
         self.swapchain = try SwapchainGeneration.create(&self, .null_handle, surface_format);
         try self.createSyncObjects();
 
+        // Pipelines bake the shader interface, render state, and render pass
+        // compatibility. Descriptor layout comes first because the text pipeline
+        // layout must advertise the font texture binding.
         self.text_descriptor_set_layout = try self.createTextDescriptorSetLayout();
         self.pipeline_layout = try self.createPipelineLayout();
         self.rectangle_pipeline = try self.createRectanglePipeline();
         self.text_pipeline = try self.createTextPipeline();
         self.text_descriptor_pool = try self.createTextDescriptorPool();
 
+        // These buffers stay mapped for the life of the renderer because the CPU
+        // rewrites transient draw data every frame.
         self.rectangle_instance_buffer = try self.createBuffer(
             @sizeOf(RectangleInstance) * max_rectangles_per_frame,
             .{ .vertex_buffer_bit = true },
@@ -500,11 +585,16 @@ pub const VulkanRenderer = struct {
         );
         self.draw_commands = try allocator.alloc(DrawCommand, max_draw_commands_per_frame);
         self.bitmap_font_texture = try self.createBitmapFontTextureResources();
+        // Descriptor sets contain the concrete resource handles matching the
+        // descriptor set layout, in this case the font image view plus sampler.
         self.text_descriptor_set = try self.createTextDescriptorSet();
 
         return self;
     }
 
+    /// Releases Vulkan resources in roughly the opposite order from creation.
+    /// GPU work must be idle before destroying objects that queued commands may
+    /// still reference.
     pub fn deinit(self: *VulkanRenderer) void {
         if (self.has_device) {
             self.dev.deviceWaitIdle() catch {};
@@ -544,6 +634,8 @@ pub const VulkanRenderer = struct {
         }
     }
 
+    /// Current drawable size in physical framebuffer pixels, not logical window
+    /// coordinates. High-DPI displays can make these differ.
     pub fn framebufferPixelSize(self: *VulkanRenderer) FramebufferPixelSize {
         const swapchain = self.swapchain.?;
         return .{
@@ -552,6 +644,8 @@ pub const VulkanRenderer = struct {
         };
     }
 
+    /// Initializes the zgui Vulkan backend so ImGui can append its own draw
+    /// commands into our render pass.
     pub fn initDebugUi(self: *VulkanRenderer, window: *zglfw.Window) !void {
         const swapchain = self.swapchain.?;
         if (!zgui.backend.loadFunctions(versionToU32(vk.API_VERSION_1_3), loadZguiVulkanFunction, self)) {
@@ -582,14 +676,21 @@ pub const VulkanRenderer = struct {
         self.debug_ui_initialized = false;
     }
 
+    /// Starts rendering a frame. Returns null when rendering should be skipped,
+    /// for example while the window is minimized or after an unrecoverable Vulkan
+    /// error.
     pub fn beginFrame(self: *VulkanRenderer, clear_color: Color) ?Frame {
         if (self.fatal_render_error) return null;
 
+        // A minimized window can report a zero-size framebuffer. Vulkan cannot
+        // create or render to zero-size swapchain images.
         const requested_extent = self.windowFramebufferExtent();
         if (requested_extent.width == 0 or requested_extent.height == 0) return null;
 
         var swapchain = self.swapchain.?;
 
+        // The swapchain images are fixed-size; recreate them when the window's
+        // framebuffer size changes.
         if (requested_extent.width != swapchain.extent.width or requested_extent.height != swapchain.extent.height) {
             self.recreateSwapchain() catch |err| {
                 std.log.err("failed to recreate Vulkan swapchain: {s}", .{@errorName(err)});
@@ -598,6 +699,8 @@ pub const VulkanRenderer = struct {
             swapchain = self.swapchain.?;
         }
 
+        // This renderer keeps one command buffer and one set of frame sync
+        // objects, so wait until the previous submission has fully finished.
         const frame_fence = self.in_flight_fence;
         _ = self.dev.waitForFences(1, @ptrCast(&frame_fence), .true, std.math.maxInt(u64)) catch |err| {
             std.log.err("failed waiting for Vulkan frame fence: {s}", .{@errorName(err)});
@@ -605,6 +708,9 @@ pub const VulkanRenderer = struct {
             return null;
         };
 
+        // Acquire chooses the next swapchain image we are allowed to render into.
+        // image_available will be signaled by the presentation engine when that
+        // image is actually ready for GPU drawing.
         const acquired = self.dev.acquireNextImageKHR(
             swapchain.handle,
             std.math.maxInt(u64),
@@ -626,6 +732,8 @@ pub const VulkanRenderer = struct {
 
         const image_index = acquired.image_index;
         const command_buffer = self.command_buffer;
+        // Command buffers are just recorded command lists; reset and rerecord the
+        // list each frame with the current target image and draw commands.
         self.dev.resetCommandBuffer(command_buffer, .{}) catch |err| {
             std.log.err("failed resetting Vulkan command buffer: {s}", .{@errorName(err)});
             self.fatal_render_error = true;
@@ -642,6 +750,8 @@ pub const VulkanRenderer = struct {
             .extent = swapchain.extent,
         };
         const clear = clear_color.toVkClear();
+        // Beginning the render pass selects the framebuffer for this swapchain
+        // image and performs the configured clear operation.
         self.dev.cmdBeginRenderPass(command_buffer, &.{
             .render_pass = self.render_pass,
             .framebuffer = swapchain.framebuffers[image_index],
@@ -662,6 +772,8 @@ pub const VulkanRenderer = struct {
             .offset = .{ .x = 0, .y = 0 },
             .extent = swapchain.extent,
         };
+        // These are dynamic pipeline states, so they can be set per frame rather
+        // than baked into every pipeline object.
         self.dev.cmdSetViewport(command_buffer, 0, 1, @ptrCast(&viewport));
         self.dev.cmdSetScissor(command_buffer, 0, 1, @ptrCast(&scissor));
 
@@ -669,6 +781,8 @@ pub const VulkanRenderer = struct {
             @floatFromInt(swapchain.extent.width),
             @floatFromInt(swapchain.extent.height),
         } };
+        // Shaders use the framebuffer size to convert the public top-left pixel
+        // coordinate API into Vulkan clip-space coordinates.
         self.dev.cmdPushConstants(
             command_buffer,
             self.pipeline_layout,
@@ -692,6 +806,9 @@ pub const VulkanRenderer = struct {
         memory_flags: vk.MemoryPropertyFlags,
         map_memory: bool,
     ) !BufferResource {
+        // Vulkan separates buffer handles from the memory backing them. First
+        // create the buffer object, then ask the driver what memory requirements
+        // that object has and bind a matching allocation.
         const buffer = try self.dev.createBuffer(&.{
             .size = size,
             .usage = usage,
@@ -715,6 +832,9 @@ pub const VulkanRenderer = struct {
     }
 
     fn allocate(self: *const VulkanRenderer, requirements: vk.MemoryRequirements, flags: vk.MemoryPropertyFlags) !vk.DeviceMemory {
+        // memory_type_bits is a bitset of memory heaps compatible with the
+        // resource. findMemoryTypeIndex narrows that to one with the requested
+        // properties, such as CPU-visible or device-local memory.
         return try self.dev.allocateMemory(&.{
             .allocation_size = requirements.size,
             .memory_type_index = try self.findMemoryTypeIndex(requirements.memory_type_bits, flags),
@@ -734,6 +854,8 @@ pub const VulkanRenderer = struct {
         const requested_extent = self.windowFramebufferExtent();
         if (requested_extent.width == 0 or requested_extent.height == 0) return error.InvalidSurfaceDimensions;
 
+        // Waiting idle is simple and safe for this POC. A more advanced renderer
+        // would keep old swapchains alive until only the work using them finishes.
         try self.dev.deviceWaitIdle();
 
         var old_generation = self.swapchain.?;
@@ -749,6 +871,8 @@ pub const VulkanRenderer = struct {
     fn createSyncObjects(self: *VulkanRenderer) !void {
         self.image_available = try self.dev.createSemaphore(&.{}, null);
         self.render_finished = try self.dev.createSemaphore(&.{}, null);
+        // Start signaled so the first frame does not wait forever for a previous
+        // submission that does not exist yet.
         self.in_flight_fence = try self.dev.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
     }
 
@@ -759,6 +883,9 @@ pub const VulkanRenderer = struct {
     }
 
     fn createRenderPass(self: *VulkanRenderer, format: vk.Format) !vk.RenderPass {
+        // A render pass describes attachments and their lifetime inside a frame.
+        // This pass has one color attachment: clear it, draw into it, then leave
+        // it in the layout required by presentation.
         const color_attachment = vk.AttachmentDescription{
             .flags = .{},
             .format = format,
@@ -776,6 +903,8 @@ pub const VulkanRenderer = struct {
             .layout = .color_attachment_optimal,
         };
 
+        // A subpass is a phase inside a render pass. We only need one graphics
+        // subpass that writes to the swapchain color attachment.
         const subpass = vk.SubpassDescription{
             .flags = .{},
             .pipeline_bind_point = .graphics,
@@ -801,6 +930,8 @@ pub const VulkanRenderer = struct {
     }
 
     fn framePushConstantRange() vk.PushConstantRange {
+        // The pipeline layout must declare which shader stages may read each
+        // push-constant byte range before command buffers can write it.
         return .{
             .stage_flags = .{ .vertex_bit = true },
             .offset = 0,
@@ -809,6 +940,8 @@ pub const VulkanRenderer = struct {
     }
 
     fn createRectanglePipeline(self: *VulkanRenderer) !vk.Pipeline {
+        // input_rate = instance means these attributes advance once per rectangle
+        // rather than once per generated vertex.
         const binding = vk.VertexInputBindingDescription{
             .binding = 0,
             .stride = @sizeOf(RectangleInstance),
@@ -831,6 +964,8 @@ pub const VulkanRenderer = struct {
     }
 
     fn createTextDescriptorSetLayout(self: *VulkanRenderer) !vk.DescriptorSetLayout {
+        // Binding 0 is the font atlas plus sampler used by text.frag. The layout
+        // describes the type and shader visibility, not the actual image.
         const binding = vk.DescriptorSetLayoutBinding{
             .binding = 0,
             .descriptor_type = .combined_image_sampler,
@@ -848,6 +983,8 @@ pub const VulkanRenderer = struct {
 
     fn createPipelineLayout(self: *VulkanRenderer) !vk.PipelineLayout {
         const frame_constants_range = framePushConstantRange();
+        // The layout is shared by both pipelines. Rectangles do not read the text
+        // descriptor set, but sharing one layout keeps binding code simple.
         return try self.dev.createPipelineLayout(&.{
             .flags = .{},
             .set_layout_count = 1,
@@ -858,6 +995,8 @@ pub const VulkanRenderer = struct {
     }
 
     fn createTextPipeline(self: *VulkanRenderer) !vk.Pipeline {
+        // Text instances carry both screen placement and UV bounds into the font
+        // atlas. The fragment shader uses the sampled alpha as the glyph mask.
         const binding = vk.VertexInputBindingDescription{
             .binding = 0,
             .stride = @sizeOf(GlyphInstance),
@@ -890,6 +1029,8 @@ pub const VulkanRenderer = struct {
         attributes: []const vk.VertexInputAttributeDescription,
         alpha_blend: bool,
     ) !vk.Pipeline {
+        // Shader modules are temporary wrappers around SPIR-V bytecode. Once the
+        // pipeline is created, Vulkan has copied what it needs from them.
         const vert = try self.dev.createShaderModule(&.{
             .flags = .{},
             .code_size = vert_spv.len,
@@ -920,6 +1061,8 @@ pub const VulkanRenderer = struct {
                 .p_specialization_info = null,
             },
         };
+        // Vertex input tells Vulkan how bytes in the bound instance buffer map to
+        // shader input locations like in_position or in_color.
         const vertex_input = vk.PipelineVertexInputStateCreateInfo{
             .flags = .{},
             .vertex_binding_description_count = 1,
@@ -927,11 +1070,15 @@ pub const VulkanRenderer = struct {
             .vertex_attribute_description_count = @intCast(attributes.len),
             .p_vertex_attribute_descriptions = attributes.ptr,
         };
+        // Every quad is submitted as a triangle list: vertices 0,1,2 form the
+        // first triangle and vertices 3,4,5 form the second.
         const input_assembly = vk.PipelineInputAssemblyStateCreateInfo{
             .flags = .{},
             .topology = .triangle_list,
             .primitive_restart_enable = .false,
         };
+        // The actual viewport/scissor rectangles are dynamic state, so these
+        // pointers are intentionally filled when recording a frame, not here.
         const viewport_state = vk.PipelineViewportStateCreateInfo{
             .flags = .{},
             .viewport_count = 1,
@@ -939,6 +1086,8 @@ pub const VulkanRenderer = struct {
             .scissor_count = 1,
             .p_scissors = undefined,
         };
+        // Rasterization turns triangles into fragments/pixels. Culling is off so
+        // our generated triangle winding does not accidentally hide 2D quads.
         const rasterizer = vk.PipelineRasterizationStateCreateInfo{
             .flags = .{},
             .depth_clamp_enable = .false,
@@ -952,6 +1101,7 @@ pub const VulkanRenderer = struct {
             .depth_bias_slope_factor = 0,
             .line_width = 1,
         };
+        // No multisampling for now; each covered pixel gets one sample.
         const multisample = vk.PipelineMultisampleStateCreateInfo{
             .flags = .{},
             .rasterization_samples = .{ .@"1_bit" = true },
@@ -961,6 +1111,8 @@ pub const VulkanRenderer = struct {
             .alpha_to_coverage_enable = .false,
             .alpha_to_one_enable = .false,
         };
+        // Text needs alpha blending so glyph edges/holes let the background show
+        // through. Solid rectangles write their color directly.
         const color_blend_attachment = vk.PipelineColorBlendAttachmentState{
             .blend_enable = if (alpha_blend) .true else .false,
             .src_color_blend_factor = if (alpha_blend) .src_alpha else .one,
@@ -980,6 +1132,8 @@ pub const VulkanRenderer = struct {
             .blend_constants = [_]f32{ 0, 0, 0, 0 },
         };
         const dynamic_states = [_]vk.DynamicState{ .viewport, .scissor };
+        // Dynamic state keeps window-size dependent values out of pipeline
+        // objects, avoiding pipeline recreation on resize.
         const dynamic_state = vk.PipelineDynamicStateCreateInfo{
             .flags = .{},
             .dynamic_state_count = dynamic_states.len,
@@ -1006,11 +1160,15 @@ pub const VulkanRenderer = struct {
         };
 
         var pipeline: vk.Pipeline = undefined;
+        // A graphics pipeline is the full recipe for drawing: shader stages,
+        // vertex data layout, fixed-function state, and render-pass compatibility.
         _ = try self.dev.createGraphicsPipelines(.null_handle, 1, @ptrCast(&pipeline_info), null, @ptrCast(&pipeline));
         return pipeline;
     }
 
     fn createTextDescriptorPool(self: *VulkanRenderer) !vk.DescriptorPool {
+        // Descriptor sets are allocated from pools. This renderer needs exactly
+        // one set with exactly one combined image sampler for the font atlas.
         const pool_size = vk.DescriptorPoolSize{
             .type = .combined_image_sampler,
             .descriptor_count = 1,
@@ -1031,6 +1189,8 @@ pub const VulkanRenderer = struct {
             .p_set_layouts = @ptrCast(&self.text_descriptor_set_layout),
         }, @ptrCast(&descriptor_set));
 
+        // The descriptor set stores the concrete font texture handles that match
+        // binding 0 in the text descriptor set layout and text.frag.
         const image_info = vk.DescriptorImageInfo{
             .sampler = self.bitmap_font_texture.sampler,
             .image_view = self.bitmap_font_texture.view,
@@ -1057,6 +1217,8 @@ pub const VulkanRenderer = struct {
         std.debug.assert(monogram_font.data.len == monogram_font.glyph_count);
         std.debug.assert(monogram_font.data[0].len == monogram_font.glyph_height);
 
+        // Convert the packed 1-bit glyph data into an RGBA atlas. RGB stays
+        // white and alpha becomes the glyph mask sampled by the text shader.
         const rgba_pixels = try self.allocator.alloc(u8, pixel_count * 4);
         defer self.allocator.free(rgba_pixels);
         @memset(rgba_pixels, 0);
@@ -1078,6 +1240,8 @@ pub const VulkanRenderer = struct {
             }
         }
 
+        // Device-local images are fast for the GPU but not directly writable by
+        // the CPU, so upload through a temporary CPU-visible staging buffer.
         var staging = try self.createBuffer(
             rgba_pixels.len,
             .{ .transfer_src_bit = true },
@@ -1089,6 +1253,8 @@ pub const VulkanRenderer = struct {
         const staging_bytes: [*]u8 = @ptrCast(@alignCast(staging.mapped.?));
         @memcpy(staging_bytes[0..rgba_pixels.len], rgba_pixels);
 
+        // The image is the GPU-owned texture. It can receive transfer copies and
+        // later be sampled by the fragment shader.
         const image = try self.dev.createImage(&.{
             .flags = .{},
             .image_type = .@"2d",
@@ -1113,6 +1279,8 @@ pub const VulkanRenderer = struct {
 
         try self.uploadFontTexture(image, staging.buffer, width, height);
 
+        // An image view describes how shaders see the image. Here it is a simple
+        // 2D color texture with one mip level and one array layer.
         const view = try self.dev.createImageView(&.{
             .image = image,
             .view_type = .@"2d",
@@ -1128,6 +1296,8 @@ pub const VulkanRenderer = struct {
         }, null);
         errdefer self.dev.destroyImageView(view, null);
 
+        // Nearest filtering preserves the pixel-font shape instead of smoothing
+        // it like a photographic texture.
         const sampler = try self.dev.createSampler(&.{
             .flags = .{},
             .mag_filter = .nearest,
@@ -1156,6 +1326,8 @@ pub const VulkanRenderer = struct {
     }
 
     fn uploadFontTexture(self: *VulkanRenderer, image: vk.Image, staging_buffer: vk.Buffer, width: u32, height: u32) !void {
+        // Texture upload is a short-lived GPU job, separate from the per-frame
+        // command buffer, so allocate a temporary command buffer for it.
         var command_buffer: vk.CommandBuffer = undefined;
         try self.dev.allocateCommandBuffers(&.{
             .command_pool = self.command_pool,
@@ -1166,6 +1338,9 @@ pub const VulkanRenderer = struct {
 
         try self.dev.beginCommandBuffer(command_buffer, &.{ .flags = .{ .one_time_submit_bit = true } });
 
+        // Images must be in a layout compatible with the operation being done.
+        // Move from undefined contents into transfer-destination layout before
+        // copying pixels from the staging buffer.
         transitionImageLayout(self.dev, command_buffer, image, .undefined, .transfer_dst_optimal);
 
         const region = vk.BufferImageCopy{
@@ -1183,6 +1358,8 @@ pub const VulkanRenderer = struct {
         };
         self.dev.cmdCopyBufferToImage(command_buffer, staging_buffer, image, .transfer_dst_optimal, 1, @ptrCast(&region));
 
+        // After the copy, move the image into the read-only layout expected by
+        // the text fragment shader.
         transitionImageLayout(self.dev, command_buffer, image, .transfer_dst_optimal, .shader_read_only_optimal);
 
         try self.dev.endCommandBuffer(command_buffer);
@@ -1197,10 +1374,14 @@ pub const VulkanRenderer = struct {
             .p_signal_semaphores = undefined,
         };
         try self.dev.queueSubmit(self.graphics_queue.handle, 1, @ptrCast(&submit_info), .null_handle);
+        // Synchronous upload keeps initialization simple: when this returns the
+        // font texture is ready for descriptor setup and future draw calls.
         try self.dev.queueWaitIdle(self.graphics_queue.handle);
     }
 
     fn windowFramebufferExtent(self: *const VulkanRenderer) vk.Extent2D {
+        // GLFW returns signed dimensions; clamp negatives defensively before
+        // converting to Vulkan's unsigned extent type.
         const framebuffer_size = self.window.getFramebufferSize();
         return .{
             .width = @intCast(@max(framebuffer_size[0], 0)),
@@ -1214,6 +1395,8 @@ const Queue = struct {
     family: u32 = 0,
 
     fn init(device: Device, family: u32) Queue {
+        // Queue index 0 is enough because each requested family asked the device
+        // for one queue during logical-device creation.
         return .{
             .handle = device.getDeviceQueue(family, 0),
             .family = family,
@@ -1230,6 +1413,8 @@ const SwapchainGeneration = struct {
     framebuffers: []vk.Framebuffer,
 
     fn create(renderer: *VulkanRenderer, old_handle: vk.SwapchainKHR, surface_format: vk.SurfaceFormatKHR) !SwapchainGeneration {
+        // Surface capabilities are the window system's constraints: min/max image
+        // count, supported extents, transforms, and similar presentation rules.
         const caps = try renderer.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(renderer.pdev, renderer.surface);
         const extent = findActualExtent(caps, renderer.windowFramebufferExtent());
         if (extent.width == 0 or extent.height == 0) return error.InvalidSurfaceDimensions;
@@ -1237,9 +1422,13 @@ const SwapchainGeneration = struct {
         const supported_format = try findSurfaceFormat(renderer, renderer.allocator, surface_format);
         const present_mode = try findPresentMode(renderer, renderer.allocator);
 
+        // Asking for one more image than the minimum gives the GPU/presenter a
+        // little buffering room, capped by the surface if it has a maximum.
         var image_count = caps.min_image_count + 1;
         if (caps.max_image_count > 0) image_count = @min(image_count, caps.max_image_count);
 
+        // If graphics and present use different queue families, images must be
+        // shareable by both families. Otherwise exclusive sharing is cheaper.
         const qfi = [_]u32{ renderer.graphics_queue.family, renderer.present_queue.family };
         const sharing_mode: vk.SharingMode = if (renderer.graphics_queue.family != renderer.present_queue.family) .concurrent else .exclusive;
         const concurrent = sharing_mode == .concurrent;
@@ -1266,6 +1455,8 @@ const SwapchainGeneration = struct {
         const images = try renderer.dev.getSwapchainImagesAllocKHR(handle, renderer.allocator);
         defer renderer.allocator.free(images);
 
+        // Swapchain images are owned by Vulkan, but we create image views so they
+        // can be used as framebuffer attachments.
         const image_views = try renderer.allocator.alloc(vk.ImageView, images.len);
         errdefer renderer.allocator.free(image_views);
 
@@ -1295,6 +1486,8 @@ const SwapchainGeneration = struct {
         var framebuffer_count: usize = 0;
         errdefer for (framebuffers[0..framebuffer_count]) |framebuffer| renderer.dev.destroyFramebuffer(framebuffer, null);
 
+        // Each framebuffer pairs the render pass with one concrete swapchain
+        // image view. beginFrame picks the framebuffer matching the acquired image.
         for (framebuffers, image_views) |*framebuffer_out, image_view| {
             framebuffer_out.* = try renderer.dev.createFramebuffer(&.{
                 .render_pass = renderer.render_pass,
@@ -1318,6 +1511,8 @@ const SwapchainGeneration = struct {
     }
 
     fn deinit(self: *SwapchainGeneration, renderer: *VulkanRenderer) void {
+        // Destroy the objects we created around swapchain images before destroying
+        // the swapchain handle itself.
         for (self.framebuffers) |framebuffer| renderer.dev.destroyFramebuffer(framebuffer, null);
         renderer.allocator.free(self.framebuffers);
 
@@ -1336,6 +1531,7 @@ const BufferResource = struct {
     size: vk.DeviceSize = 0,
 
     fn deinit(self: *BufferResource, renderer: *VulkanRenderer) void {
+        // Mapped memory must be unmapped before freeing the device allocation.
         if (self.mapped != null) {
             renderer.dev.unmapMemory(self.memory);
             self.mapped = null;
@@ -1353,6 +1549,8 @@ const FontTextureResources = struct {
     sampler: vk.Sampler = .null_handle,
 
     fn deinit(self: *FontTextureResources, renderer: *VulkanRenderer) void {
+        // The view and sampler reference the image, and the image references the
+        // memory allocation, so tear them down in that order.
         if (self.sampler != .null_handle) renderer.dev.destroySampler(self.sampler, null);
         if (self.view != .null_handle) renderer.dev.destroyImageView(self.view, null);
         if (self.image != .null_handle) renderer.dev.destroyImage(self.image, null);
@@ -1362,6 +1560,8 @@ const FontTextureResources = struct {
 };
 
 fn createInstance(vkb: *const BaseWrapper) !vk.Instance {
+    // GLFW tells us which instance extensions are required for creating a window
+    // surface on the current platform, such as X11/Wayland/Win32 surface support.
     const extension_names = try zglfw.getRequiredInstanceExtensions();
 
     const app_info = vk.ApplicationInfo{
@@ -1384,6 +1584,9 @@ fn createInstance(vkb: *const BaseWrapper) !vk.Instance {
 
 fn initializeDevice(instance: Instance, candidate: DeviceCandidate) !vk.Device {
     const priority = [_]f32{1};
+    // A logical device exposes the queue families selected from the physical GPU.
+    // If graphics and present are the same family, queue_count below collapses
+    // this to one queue-create entry.
     const queue_infos = [_]vk.DeviceQueueCreateInfo{
         .{
             .flags = .{},
@@ -1423,6 +1626,8 @@ const QueueAllocation = struct {
 };
 
 fn pickPhysicalDevice(instance: Instance, allocator: std.mem.Allocator, surface: vk.SurfaceKHR) !DeviceCandidate {
+    // Pick the first GPU that supports our required device extension, can present
+    // to this window surface, and exposes the needed queue families.
     const devices = try instance.enumeratePhysicalDevicesAlloc(allocator);
     defer allocator.free(devices);
 
@@ -1434,6 +1639,8 @@ fn pickPhysicalDevice(instance: Instance, allocator: std.mem.Allocator, surface:
 }
 
 fn checkSuitable(instance: Instance, pdev: vk.PhysicalDevice, allocator: std.mem.Allocator, surface: vk.SurfaceKHR) !?DeviceCandidate {
+    // Suitability is intentionally minimal for the POC. Later we could score
+    // devices by type, memory size, limits, or optional features.
     if (!try checkDeviceExtensionSupport(instance, pdev, allocator)) return null;
     if (!try checkSurfaceSupport(instance, pdev, surface)) return null;
 
@@ -1454,6 +1661,8 @@ fn allocateQueues(instance: Instance, pdev: vk.PhysicalDevice, allocator: std.me
     var graphics_family: ?u32 = null;
     var present_family: ?u32 = null;
 
+    // Graphics commands and presenting to the OS window are separate capabilities
+    // in Vulkan. Many GPUs expose both on the same family, but not all do.
     for (families, 0..) |properties, i| {
         const family: u32 = @intCast(i);
         if (graphics_family == null and properties.queue_flags.graphics_bit) graphics_family = family;
@@ -1469,6 +1678,8 @@ fn allocateQueues(instance: Instance, pdev: vk.PhysicalDevice, allocator: std.me
 }
 
 fn checkSurfaceSupport(instance: Instance, pdev: vk.PhysicalDevice, surface: vk.SurfaceKHR) !bool {
+    // A usable presentation surface must expose at least one pixel format and one
+    // present mode for the selected GPU.
     var format_count: u32 = undefined;
     _ = try instance.getPhysicalDeviceSurfaceFormatsKHR(pdev, surface, &format_count, null);
     var present_mode_count: u32 = undefined;
@@ -1477,6 +1688,8 @@ fn checkSurfaceSupport(instance: Instance, pdev: vk.PhysicalDevice, surface: vk.
 }
 
 fn checkDeviceExtensionSupport(instance: Instance, pdev: vk.PhysicalDevice, allocator: std.mem.Allocator) !bool {
+    // Device extensions are optional GPU/device features. Swapchain support is
+    // mandatory for rendering into a window.
     const available = try instance.enumerateDeviceExtensionPropertiesAlloc(pdev, null, allocator);
     defer allocator.free(available);
 
@@ -1491,6 +1704,8 @@ fn checkDeviceExtensionSupport(instance: Instance, pdev: vk.PhysicalDevice, allo
 }
 
 fn findSurfaceFormat(renderer: *VulkanRenderer, allocator: std.mem.Allocator, required: ?vk.SurfaceFormatKHR) !vk.SurfaceFormatKHR {
+    // Prefer a common sRGB swapchain format so color values are converted for the
+    // monitor in the usual nonlinear color space.
     const default_preferred = vk.SurfaceFormatKHR{
         .format = .b8g8r8a8_srgb,
         .color_space = .srgb_nonlinear_khr,
@@ -1509,6 +1724,8 @@ fn findSurfaceFormat(renderer: *VulkanRenderer, allocator: std.mem.Allocator, re
 }
 
 fn findPresentMode(renderer: *VulkanRenderer, allocator: std.mem.Allocator) !vk.PresentModeKHR {
+    // Present mode controls how rendered images are queued to the display. Prefer
+    // low-latency modes when available; FIFO is always supported and vsync-like.
     const modes = try renderer.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(renderer.pdev, renderer.surface, allocator);
     defer allocator.free(modes);
 
@@ -1520,6 +1737,8 @@ fn findPresentMode(renderer: *VulkanRenderer, allocator: std.mem.Allocator) !vk.
 }
 
 fn findActualExtent(caps: vk.SurfaceCapabilitiesKHR, extent: vk.Extent2D) vk.Extent2D {
+    // Some platforms dictate the swapchain size via current_extent. Others allow
+    // the application to choose within min/max bounds.
     if (caps.current_extent.width != 0xFFFF_FFFF) return caps.current_extent;
     return .{
         .width = std.math.clamp(extent.width, caps.min_image_extent.width, caps.max_image_extent.width),
@@ -1528,6 +1747,9 @@ fn findActualExtent(caps: vk.SurfaceCapabilitiesKHR, extent: vk.Extent2D) vk.Ext
 }
 
 fn transitionImageLayout(device: Device, command_buffer: vk.CommandBuffer, image: vk.Image, old_layout: vk.ImageLayout, new_layout: vk.ImageLayout) void {
+    // A pipeline barrier orders previous GPU work before future GPU work and
+    // changes how an image's memory may be accessed. This helper only covers the
+    // two transitions needed by font upload.
     const src_access: vk.AccessFlags = if (old_layout == .undefined) .{} else .{ .transfer_write_bit = true };
     const dst_access: vk.AccessFlags = if (new_layout == .transfer_dst_optimal) .{ .transfer_write_bit = true } else .{ .shader_read_bit = true };
     const src_stage: vk.PipelineStageFlags = if (old_layout == .undefined) .{ .top_of_pipe_bit = true } else .{ .transfer_bit = true };
@@ -1554,16 +1776,22 @@ fn transitionImageLayout(device: Device, command_buffer: vk.CommandBuffer, image
 }
 
 fn getGlfwInstanceProcAddr(instance: vk.Instance, procname: [*:0]const u8) vk.PfnVoidFunction {
+    // vulkan-zig needs a function loader; GLFW provides one that is already
+    // wired up for the Vulkan loader used by the window.
     return @ptrCast(zglfw.getInstanceProcAddress(instance, procname));
 }
 
 fn loadZguiVulkanFunction(function_name: [*:0]const u8, user_data: ?*anyopaque) callconv(.c) ?*anyopaque {
+    // zgui expects a C-style callback that resolves Vulkan function names. Pass
+    // the renderer as user data so the callback can use the live instance.
     const self: *VulkanRenderer = @ptrCast(@alignCast(user_data.?));
     const function = zglfw.getInstanceProcAddress(self.instance.handle, function_name) orelse return null;
     return @ptrCast(@constCast(function));
 }
 
 fn imguiHandle(handle: anytype) zgui.backend.VkHandle {
+    // The zgui backend type-erases Vulkan handles as pointers. Vulkan-zig wraps
+    // them as integer-like enums, so convert through the integer value.
     const value = @intFromEnum(handle);
     if (value == 0) return null;
     return @ptrFromInt(@as(usize, @intCast(value)));
@@ -1587,6 +1815,8 @@ const BitmapGlyph = struct {
 };
 
 fn bitmapGlyph(codepoint: u21) ?BitmapGlyph {
+    // Map a Unicode codepoint into the monogram bitmap atlas. Unsupported
+    // codepoints return null and callers can fall back to '?'.
     if (codepoint < monogram_font.first_codepoint) return null;
     const glyph_index = codepoint - monogram_font.first_codepoint;
     if (glyph_index >= monogram_font.glyph_count) return null;
@@ -1614,6 +1844,8 @@ fn glyphInstance(
     atlas_height: f32,
     color: [4]f32,
 ) GlyphInstance {
+    // Shaders sample textures using normalized UV coordinates in the 0..1 range,
+    // while the font metadata stores atlas bounds in pixels.
     const uv_left = atlas_bounds.left / atlas_width;
     const uv_top = atlas_bounds.top / atlas_height;
     const uv_right = atlas_bounds.right / atlas_width;
