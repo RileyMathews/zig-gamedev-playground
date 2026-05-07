@@ -46,6 +46,9 @@ pub fn main() !void {
     var show_debug_ui = false;
     var previous_f10 = zglfw.Action.release;
 
+    var show_roster_menu = false;
+    var previous_r = zglfw.Action.release;
+
     var frame_arena = std.heap.ArenaAllocator.init(allocator);
     const frame_allocator = frame_arena.allocator();
 
@@ -55,6 +58,17 @@ pub fn main() !void {
         zglfw.pollEvents();
 
         const f10 = window.getKey(.F10);
+        if (f10 == .press and previous_f10 == .release) {
+            show_debug_ui = !show_debug_ui;
+        }
+        previous_f10 = f10;
+
+        const r_key_state = window.getKey(.r);
+        if (r_key_state == .press and previous_r == .release) {
+            show_roster_menu = !show_roster_menu;
+        }
+        previous_r = r_key_state;
+        
         const mouse_pos_raw = window.getCursorPos();
         const mouse_pos: render.Vec2 = .{
             .x = @floatCast(mouse_pos_raw[0]),
@@ -62,10 +76,6 @@ pub fn main() !void {
         };
         const hover_tile = tileAtPosition(mouse_pos);
 
-        if (f10 == .press and previous_f10 == .release) {
-            show_debug_ui = !show_debug_ui;
-        }
-        previous_f10 = f10;
 
         var frame = renderer.beginFrame(render.Color.white) orelse continue;
         defer frame.end();
@@ -95,6 +105,18 @@ pub fn main() !void {
                     });
                 }
             }
+        }
+
+        if (show_roster_menu) {
+            const roster_menu_rect: render.Rectangle = .{
+                .size = .{ .x = 100, .y = 200 },
+                .position = .{ .x = 0, .y = 0},
+            };
+
+            frame.drawRectangle(.{
+                .rectangle = roster_menu_rect,
+                .color = render.Color.black,
+            });  
         }
 
         if (show_debug_ui) {
