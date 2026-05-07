@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
     // working while still allowing `-Dtarget=...` overrides.
     const target = b.standardTargetOptions(.{ .default_target = defaultTarget() });
     const optimize = b.standardOptimizeOption(.{});
+    const enable_ztracy = b.option(bool, "enable_ztracy", "Enable Tracy profile markers") orelse false;
 
     const exe = b.addExecutable(.{
         .name = "zig_gamedev_playground",
@@ -43,6 +44,16 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("zgui", zgui.module("root"));
     exe.linkLibrary(zgui.artifact("imgui"));
+
+    const ztracy = b.dependency("ztracy", .{
+        .target = target,
+        .optimize = optimize,
+        .enable_ztracy = enable_ztracy,
+    });
+    const tracy = ztracy.artifact("tracy");
+    tracy.root_module.addCMacro("TRACY_NO_CALLSTACK", "");
+    exe.root_module.addImport("ztracy", ztracy.module("root"));
+    exe.linkLibrary(tracy);
 
     const renderer_mod = b.createModule(.{
         .root_source_file = b.path("src/renderers/vulkan/renderer.zig"),

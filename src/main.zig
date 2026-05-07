@@ -1,5 +1,6 @@
 const std = @import("std");
 const zglfw = @import("zglfw");
+const ztracy = @import("ztracy");
 
 const debug_ui = @import("debug_ui.zig");
 const render = @import("renderer");
@@ -28,6 +29,8 @@ fn tileAtPosition(position: render.Vec2) ?TileCoord {
 }
 
 pub fn main() !void {
+    ztracy.SetThreadName("main");
+
     try zglfw.init();
     defer zglfw.terminate();
 
@@ -50,53 +53,88 @@ pub fn main() !void {
     const frame_allocator = frame_arena.allocator();
 
     while (!window.shouldClose()) {
-        _ = frame_arena.reset(.retain_capacity);
-        zglfw.pollEvents();
-        const f10 = window.getKey(.F10);
+        const frame_zone = ztracy.ZoneN(@src(), "Frame");
+        defer ztracy.FrameMark();
+        defer frame_zone.End();
 
-        const mouse_pos_raw = window.getCursorPos();
-        const mouse_pos: render.Vec2 = .{
-            .x = @floatCast(mouse_pos_raw[0]),
-            .y = @floatCast(mouse_pos_raw[1]),
-        };
-        const hover_tile = tileAtPosition(mouse_pos);
-
-        if (f10 == .press and previous_f10 == .release) {
-            show_debug_ui = !show_debug_ui;
+        {
+            const tracy_zone = ztracy.ZoneN(@src(), "Reset Frame Arena");
+            defer tracy_zone.End();
+            _ = frame_arena.reset(.retain_capacity);
         }
-        previous_f10 = f10;
 
-        var frame = renderer.beginFrame(render.Color.white) orelse continue;
-        defer frame.end();
+        {
+            const tracy_zone = ztracy.ZoneN(@src(), "Poll Events");
+            defer tracy_zone.End();
+            zglfw.pollEvents();
+        }
 
-        for (0..world_height) |y| {
-            for (0..world_width) |x| {
-                const tile_rect: render.Rectangle = .{
-                    .size = .{ .x = tile_size, .y = tile_size },
-                    .position = .{ .x = @floatFromInt(x * tile_size), .y = @floatFromInt(y * tile_size) },
-                };
-                const is_hovered = if (hover_tile) |tile| tile.x == x and tile.y == y else false;
+        const f10 = window.getKey(.F10);
+        const mouse_pos_raw = window.getCursorPos();
+        const hover_tile = blk: {
+            const tracy_zone = ztracy.ZoneN(@src(), "Update Input");
+            defer tracy_zone.End();
 
-                frame.drawRectangle(.{
-                    .rectangle = tile_rect,
-                    .color = if (is_hovered) render.Color.green else render.Color.brown,
-                });
+            const mouse_pos: render.Vec2 = .{
+                .x = @floatCast(mouse_pos_raw[0]),
+                .y = @floatCast(mouse_pos_raw[1]),
+            };
 
-                if (show_debug_ui) {
-                    const text = try std.fmt.allocPrint(frame_allocator, "{d}/{d}", .{ x, y });
-                    const textSize = render.measureText(text, tile_text_size);
+            if (f10 == .press and previous_f10 == .release) {
+                show_debug_ui = !show_debug_ui;
+            }
+            previous_f10 = f10;
 
-                    frame.drawText(.{
-                        .text = text,
-                        .size = tile_text_size,
-                        .position = tile_rect.centeredPosition(textSize),
-                        .color = render.Color.pink,
+            break :blk tileAtPosition(mouse_pos);
+        };
+
+        const begin_frame_zone = ztracy.ZoneN(@src(), "Begin Frame");
+        var frame = renderer.beginFrame(render.Color.white) orelse {
+            begin_frame_zone.End();
+            continue;
+        };
+        begin_frame_zone.End();
+        defer {
+            const tracy_zone = ztracy.ZoneN(@src(), "End Frame");
+            defer tracy_zone.End();
+            frame.end();
+        }
+
+        {
+            const tracy_zone = ztracy.ZoneN(@src(), "Draw World");
+            defer tracy_zone.End();
+
+            for (0..world_height) |y| {
+                for (0..world_width) |x| {
+                    const tile_rect: render.Rectangle = .{
+                        .size = .{ .x = tile_size, .y = tile_size },
+                        .position = .{ .x = @floatFromInt(x * tile_size), .y = @floatFromInt(y * tile_size) },
+                    };
+                    const is_hovered = if (hover_tile) |tile| tile.x == x and tile.y == y else false;
+
+                    frame.drawRectangle(.{
+                        .rectangle = tile_rect,
+                        .color = if (is_hovered) render.Color.green else render.Color.brown,
                     });
+
+                    if (show_debug_ui) {
+                        const text = try std.fmt.allocPrint(frame_allocator, "{d}/{d}", .{ x, y });
+                        const textSize = render.measureText(text, tile_text_size);
+
+                        frame.drawText(.{
+                            .text = text,
+                            .size = tile_text_size,
+                            .position = tile_rect.centeredPosition(textSize),
+                            .color = render.Color.pink,
+                        });
+                    }
                 }
             }
         }
 
         if (show_debug_ui) {
+            const tracy_zone = ztracy.ZoneN(@src(), "Draw Debug UI");
+            defer tracy_zone.End();
             debug_ui_state.draw(&frame, renderer.framebufferPixelSize(), mouse_pos_raw, hover_tile);
         }
     }
