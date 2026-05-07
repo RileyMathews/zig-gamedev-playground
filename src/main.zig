@@ -28,6 +28,25 @@ fn tileAtPosition(position: render.Vec2) ?TileCoord {
     return .{ .x = tile_x, .y = tile_y };
 }
 
+const TrackedKey = struct {
+    key: zglfw.Key,
+    last_frame_state: zglfw.Action,
+
+    pub fn track(key: zglfw.Key) TrackedKey {
+        return .{ .key = key, .last_frame_state = .release };
+    }
+
+    pub fn isPressed(self: *TrackedKey, window: *zglfw.Window) bool {
+        var is_pressed = false;
+        const current_frame_state =  window.getKey(self.key);
+        if (current_frame_state == .press and self.last_frame_state == .release) {
+            is_pressed = true;
+        }
+        self.last_frame_state = current_frame_state;
+        return is_pressed;
+    }
+};
+
 pub fn main() !void {
     try zglfw.init();
     defer zglfw.terminate();
@@ -45,10 +64,10 @@ pub fn main() !void {
     defer debug_ui_state.deinit(&renderer);
 
     var show_debug_ui = false;
-    var previous_f10 = zglfw.Action.release;
+    var f10_key = TrackedKey.track(.F10);
 
     var show_roster_menu = false;
-    var previous_r = zglfw.Action.release;
+    var r_key = TrackedKey.track(.r);
 
     var frame_arena = std.heap.ArenaAllocator.init(allocator);
     const frame_allocator = frame_arena.allocator();
@@ -65,17 +84,13 @@ pub fn main() !void {
         zglfw.pollEvents();
         cursor.update(window);
 
-        const f10 = window.getKey(.F10);
-        if (f10 == .press and previous_f10 == .release) {
+        if (f10_key.isPressed(window)) {
             show_debug_ui = !show_debug_ui;
         }
-        previous_f10 = f10;
 
-        const r_key_state = window.getKey(.r);
-        if (r_key_state == .press and previous_r == .release) {
+        if (r_key.isPressed(window)) {
             show_roster_menu = !show_roster_menu;
         }
-        previous_r = r_key_state;
         const hover_tile = tileAtPosition(cursor.position);
 
         var frame = renderer.beginFrame(render.Color.white) orelse continue;
