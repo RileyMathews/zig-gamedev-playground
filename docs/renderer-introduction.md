@@ -54,134 +54,22 @@ The renderer therefore has two personalities:
 
 ## Core Graphics Concepts
 
-### Framebuffer Pixels
+The renderer uses a small set of graphics concepts repeatedly. This guide keeps the summaries short; the deeper concept pages live in [graphics-concepts/](graphics-concepts/README.md).
 
-The renderer's public coordinate system uses framebuffer pixels measured from the top-left of the window's drawable area.
+Read these when you want a standalone explanation plus the exact code locations where the concept appears in this project:
 
-`Rectangle.position = .{ .x = 0, .y = 0 }` means the top-left pixel of the framebuffer. This is intentionally similar to raylib and common 2D APIs.
-
-Framebuffer pixels can differ from logical window coordinates on high-DPI displays. Use `renderer.framebufferPixelSize()` when you need the actual drawable size.
-
-### Swapchain
-
-A swapchain is a small rotating set of images owned by the window system. Each frame, the renderer asks Vulkan for one available image, draws into it, then gives it back to be shown on screen.
-
-Think of it as a queue of backbuffers:
-
-- Acquire one image.
-- Render into that image.
-- Present that image.
-- Repeat next frame.
-
-The swapchain has a fixed size and format. If the window is resized, the old swapchain no longer matches the window, so the renderer recreates it.
-
-### Image View And Framebuffer
-
-A Vulkan image is raw GPU image storage. An image view describes how shaders or render passes should interpret that storage.
-
-A framebuffer pairs a render pass with concrete image views. In this renderer, each swapchain image gets:
-
-- One image view.
-- One framebuffer that uses that image view as the color attachment.
-
-When `beginFrame` acquires swapchain image `N`, it begins the render pass with framebuffer `N`.
-
-### Render Pass
-
-A render pass describes how attachments are used during rendering. This renderer has one simple render pass:
-
-- One color attachment.
-- Clear it at the start of the frame.
-- Draw rectangles, text, and optional debug UI into it.
-- Store the result.
-- Leave it in the layout needed for presentation.
-
-There is no depth buffer, no multisampling, and no multiple subpasses yet.
-
-### Command Buffer
-
-A command buffer is a recorded list of GPU commands. Vulkan normally wants you to record commands first and submit them later.
-
-This renderer uses one primary command buffer. Every frame it:
-
-- Waits until the previous frame's command buffer work is finished.
-- Resets the command buffer.
-- Records the current frame's commands.
-- Submits the command buffer to the graphics queue.
-
-This is simple and safe for a POC. A more advanced renderer would usually allow multiple frames in flight.
-
-### Pipeline
-
-A graphics pipeline is a baked recipe for drawing. It combines:
-
-- Shader stages.
-- Vertex input layout.
-- Triangle assembly mode.
-- Rasterization state.
-- Blending state.
-- Render-pass compatibility.
-- Pipeline layout, including push constants and descriptor set layouts.
-
-This renderer has two graphics pipelines:
-
-- Rectangle pipeline: draws solid-color quads.
-- Text pipeline: draws glyph quads using a font texture and alpha blending.
-
-### Shaders
-
-Shaders are small programs that run on the GPU.
-
-The vertex shader decides where vertices land on screen. The fragment shader decides the color for each covered pixel.
-
-The rectangle vertex shader generates a quad from six implicit vertices using `gl_VertexIndex`. The rectangle fragment shader outputs a solid color.
-
-The text vertex shader does the same quad generation, but also computes UV coordinates into the font atlas. The text fragment shader samples the atlas alpha and applies the requested text color.
-
-### Instance Data
-
-The renderer draws rectangles and glyphs as instanced quads.
-
-Instead of uploading six vertices for every rectangle, the shader always generates the same six quad corners. The CPU uploads only the data that changes per rectangle or glyph:
-
-- Position.
-- Size.
-- Color.
-- Font atlas UV bounds for glyphs.
-
-The GPU runs the six-vertex quad once per instance.
-
-This is why `RectangleInstance` and `GlyphInstance` exist in `renderer.zig`.
-
-### Descriptor Set
-
-A descriptor set binds resources that shaders can access. Text rendering needs one descriptor set because `text.frag` samples the font atlas texture.
-
-The descriptor set says:
-
-- Binding 0 is a combined image sampler.
-- The image view is the bitmap font texture.
-- The sampler uses nearest filtering to preserve pixel-font edges.
-
-Rectangles do not sample textures, so they do not need descriptor resources.
-
-### Push Constants
-
-Push constants are a small block of data sent directly into the command buffer. The renderer pushes `FrameConstants`, which currently stores the framebuffer size.
-
-The shaders use that size to convert public pixel coordinates into Vulkan clip-space coordinates.
-
-### Synchronization
-
-GPU work is asynchronous. The CPU can submit work faster than the GPU completes it, and presentation is also coordinated with the window system.
-
-This renderer uses:
-
-- `image_available` semaphore: signaled when the acquired swapchain image is ready for rendering.
-- `render_finished` semaphore: signaled when rendering commands finish and presentation can use the image.
-- `in_flight_fence`: lets the CPU wait until the previous submission using the single command buffer has completed.
-
-The current model is simple: one command buffer, one fence, one frame at a time.
+- [Framebuffer Pixels](graphics-concepts/framebuffer-pixels.md): the renderer's top-left pixel coordinate system and how shaders convert it to clip space.
+- [Swapchains](graphics-concepts/swapchains.md): the rotating set of presentable window images.
+- [Images, Image Views, And Framebuffers](graphics-concepts/images-image-views-and-framebuffers.md): the GPU image objects that receive pixels or hold textures.
+- [Render Passes](graphics-concepts/render-passes.md): how Vulkan describes attachment usage during a frame.
+- [Command Buffers](graphics-concepts/command-buffers.md): recorded GPU command lists used for frames and texture upload.
+- [Graphics Pipelines](graphics-concepts/graphics-pipelines.md): baked shader and fixed-function state for rectangles and text.
+- [Shaders](graphics-concepts/shaders.md): the GLSL programs that position quads and color pixels.
+- [Instance Data](graphics-concepts/instance-data.md): the per-rectangle and per-glyph records written by draw calls.
+- [Descriptor Sets](graphics-concepts/descriptor-sets.md): shader resource bindings used by text rendering for the font atlas.
+- [Push Constants](graphics-concepts/push-constants.md): tiny per-frame values sent to shaders through the command buffer.
+- [Synchronization](graphics-concepts/synchronization.md): semaphores, fences, and barriers that order GPU work.
+- [Vulkan Memory And Resources](graphics-concepts/vulkan-memory-and-resources.md): buffer/image allocation, mapped memory, and staging uploads.
 
 ## Public API Overview
 
