@@ -64,6 +64,13 @@ pub const Rectangle = struct {
             .y = self.position.y + (self.size.y - size.y) / 2.0,
         };
     }
+
+    pub fn contains(self: Rectangle, position: Vec2) bool {
+        return position.x >= self.position.x and
+            position.x < self.position.x + self.size.x and
+            position.y >= self.position.y and
+            position.y < self.position.y + self.size.y;
+    }
 };
 
 pub const DrawRectangle = struct {

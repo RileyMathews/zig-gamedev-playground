@@ -1,6 +1,7 @@
 const std = @import("std");
 const zglfw = @import("zglfw");
 
+const cursor_input = @import("cursor.zig");
 const debug_ui = @import("debug_ui.zig");
 const render = @import("renderer");
 const Renderer = render.Renderer;
@@ -52,10 +53,17 @@ pub fn main() !void {
     var frame_arena = std.heap.ArenaAllocator.init(allocator);
     const frame_allocator = frame_arena.allocator();
 
+    var cursor = cursor_input.Cursor.init(window);
+    var roster_menu_rectangle: render.Rectangle = .{
+        .position = .{ .x = 0, .y = 0 },
+        .size = .{ .x = 300, .y = 900 },
+    };
+
     while (!window.shouldClose()) {
         _ = frame_arena.reset(.retain_capacity);
 
         zglfw.pollEvents();
+        cursor.update(window);
 
         const f10 = window.getKey(.F10);
         if (f10 == .press and previous_f10 == .release) {
@@ -68,14 +76,7 @@ pub fn main() !void {
             show_roster_menu = !show_roster_menu;
         }
         previous_r = r_key_state;
-        
-        const mouse_pos_raw = window.getCursorPos();
-        const mouse_pos: render.Vec2 = .{
-            .x = @floatCast(mouse_pos_raw[0]),
-            .y = @floatCast(mouse_pos_raw[1]),
-        };
-        const hover_tile = tileAtPosition(mouse_pos);
-
+        const hover_tile = tileAtPosition(cursor.position);
 
         var frame = renderer.beginFrame(render.Color.white) orelse continue;
         defer frame.end();
@@ -108,19 +109,19 @@ pub fn main() !void {
         }
 
         if (show_roster_menu) {
-            const roster_menu_rect: render.Rectangle = .{
-                .size = .{ .x = 100, .y = 200 },
-                .position = .{ .x = 0, .y = 0},
-            };
+            if (window.getMouseButton(.left) == .press and roster_menu_rectangle.contains(cursor.position)) {
+                roster_menu_rectangle.position.x += cursor.delta.x;
+                roster_menu_rectangle.position.y += cursor.delta.y;
+            }
 
             frame.drawRectangle(.{
-                .rectangle = roster_menu_rect,
+                .rectangle = roster_menu_rectangle,
                 .color = render.Color.black,
-            });  
+            });
         }
 
         if (show_debug_ui) {
-            debug_ui_state.draw(&frame, renderer.framebufferPixelSize(), mouse_pos_raw, hover_tile);
+            debug_ui_state.draw(&frame, renderer.framebufferPixelSize(), cursor.position, hover_tile);
         }
     }
 }

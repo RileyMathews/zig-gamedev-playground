@@ -3,13 +3,15 @@ const std = @import("std");
 const zglfw = @import("zglfw");
 const zgui = @import("zgui");
 
+const render = @import("renderer");
+
 pub const FrameStats = struct {
     fps: f64,
     average_cpu_time_ms: f64,
     screen_width: u32,
     screen_height: u32,
-    mouse_x: f64,
-    mouse_y: f64,
+    mouse_x: f32,
+    mouse_y: f32,
     tile_x: ?usize,
     tile_y: ?usize,
 };
@@ -42,7 +44,7 @@ pub const DebugUi = struct {
         zgui.deinit();
     }
 
-    pub fn draw(self: *DebugUi, frame: anytype, framebuffer_size: anytype, mouse_pos: anytype, hover_tile: anytype) void {
+    pub fn draw(self: *DebugUi, frame: anytype, framebuffer_size: anytype, mouse_pos: render.Vec2, hover_tile: anytype) void {
         self.tick(zglfw.getTime());
 
         frame.beginDebugUi(framebuffer_size.width, framebuffer_size.height);
@@ -51,8 +53,8 @@ pub const DebugUi = struct {
             .average_cpu_time_ms = self.average_cpu_time_ms,
             .screen_width = framebuffer_size.width,
             .screen_height = framebuffer_size.height,
-            .mouse_x = mouse_pos[0],
-            .mouse_y = mouse_pos[1],
+            .mouse_x = mouse_pos.x,
+            .mouse_y = mouse_pos.y,
             .tile_x = if (hover_tile) |tile| tile.x else null,
             .tile_y = if (hover_tile) |tile| tile.y else null,
         });
