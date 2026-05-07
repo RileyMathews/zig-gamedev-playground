@@ -136,9 +136,20 @@ const GlyphInstance = extern struct {
     color: [4]f32,
 };
 
+const DrawRange = struct {
+    start: usize,
+    count: usize,
+};
+
+const DrawCommand = union(enum) {
+    rectangles: DrawRange,
+    text: DrawRange,
+};
+
 const quad_vertex_count = 6;
 const max_rectangles_per_frame = 64 * 1024;
 const max_text_glyphs_per_frame = 64 * 4096;
+const max_draw_commands_per_frame = 64 * 1024;
 const text_line_spacing: f32 = 2.0;
 
 const app_name = "zig-gamedev playground";
@@ -179,6 +190,7 @@ pub const VulkanRenderer = struct {
     rectangle_instance_buffer: BufferResource = .{},
     text_instance_buffer: BufferResource = .{},
     bitmap_font_texture: FontTextureResources = .{},
+    draw_commands: ?[]DrawCommand = null,
 
     debug_ui_initialized: bool = false,
 
@@ -187,9 +199,9 @@ pub const VulkanRenderer = struct {
         image_index: u32,
         command_buffer: vk.CommandBuffer,
         rectangle_count: usize = 0,
-        flushed_rectangle_count: usize = 0,
         text_instance_count: usize = 0,
-        flushed_text_instance_count: usize = 0,
+        draw_command_count: usize = 0,
+        flushed_draw_command_count: usize = 0,
         ended: bool = false,
 
         pub fn beginDebugUi(self: *Frame, screen_width: u32, screen_height: u32) void {
@@ -205,6 +217,7 @@ pub const VulkanRenderer = struct {
         pub fn drawRectangle(self: *Frame, rectangle: DrawRectangle) void {
             const renderer = self.renderer;
             if (self.rectangle_count >= max_rectangles_per_frame) return;
+            if (!self.appendRectangleCommand(self.rectangle_count, 1)) return;
 
             const instance_buffer = &renderer.rectangle_instance_buffer;
             const mapped_instances: [*]RectangleInstance = @ptrCast(@alignCast(instance_buffer.mapped.?));
@@ -215,6 +228,7 @@ pub const VulkanRenderer = struct {
         pub fn drawText(self: *Frame, text: Text) void {
             const renderer = self.renderer;
             const view = std.unicode.Utf8View.init(text.text) catch return;
+            const start_instance = self.text_instance_count;
             const instance_buffer = &renderer.text_instance_buffer;
             const mapped_instances: [*]GlyphInstance = @ptrCast(@alignCast(instance_buffer.mapped.?));
             const color = colorComponents(text.color);
@@ -254,6 +268,12 @@ pub const VulkanRenderer = struct {
                 }
 
                 text_offset_x += glyph.width * scale_factor + spacing;
+            }
+
+            const instance_count = self.text_instance_count - start_instance;
+            if (instance_count == 0) return;
+            if (!self.appendTextCommand(start_instance, instance_count)) {
+                self.text_instance_count = start_instance;
             }
         }
 
@@ -318,32 +338,83 @@ pub const VulkanRenderer = struct {
         }
 
         fn flushDraws(self: *Frame) void {
-            self.flushRectangles();
-            self.flushText();
+            const renderer = self.renderer;
+            const commands = renderer.draw_commands.?;
+
+            while (self.flushed_draw_command_count < self.draw_command_count) {
+                const command = commands[self.flushed_draw_command_count];
+                switch (command) {
+                    .rectangles => |range| self.flushRectangles(range),
+                    .text => |range| self.flushText(range),
+                }
+                self.flushed_draw_command_count += 1;
+            }
         }
 
-        fn flushRectangles(self: *Frame) void {
+        fn appendRectangleCommand(self: *Frame, start: usize, count: usize) bool {
             const renderer = self.renderer;
-            const instance_count = self.rectangle_count - self.flushed_rectangle_count;
-            if (instance_count == 0) return;
+            const commands = renderer.draw_commands.?;
 
-            const byte_offset = self.flushed_rectangle_count * @sizeOf(RectangleInstance);
+            if (self.draw_command_count > self.flushed_draw_command_count) {
+                const last = &commands[self.draw_command_count - 1];
+                switch (last.*) {
+                    .rectangles => |*range| {
+                        if (range.start + range.count == start) {
+                            range.count += count;
+                            return true;
+                        }
+                    },
+                    .text => {},
+                }
+            }
+
+            if (self.draw_command_count >= commands.len) return false;
+            commands[self.draw_command_count] = .{ .rectangles = .{ .start = start, .count = count } };
+            self.draw_command_count += 1;
+            return true;
+        }
+
+        fn appendTextCommand(self: *Frame, start: usize, count: usize) bool {
+            const renderer = self.renderer;
+            const commands = renderer.draw_commands.?;
+
+            if (self.draw_command_count > self.flushed_draw_command_count) {
+                const last = &commands[self.draw_command_count - 1];
+                switch (last.*) {
+                    .text => |*range| {
+                        if (range.start + range.count == start) {
+                            range.count += count;
+                            return true;
+                        }
+                    },
+                    .rectangles => {},
+                }
+            }
+
+            if (self.draw_command_count >= commands.len) return false;
+            commands[self.draw_command_count] = .{ .text = .{ .start = start, .count = count } };
+            self.draw_command_count += 1;
+            return true;
+        }
+
+        fn flushRectangles(self: *Frame, range: DrawRange) void {
+            const renderer = self.renderer;
+            if (range.count == 0) return;
+
+            const byte_offset = range.start * @sizeOf(RectangleInstance);
             const instance_buffer = &renderer.rectangle_instance_buffer;
             const offset = [_]vk.DeviceSize{@intCast(byte_offset)};
 
             renderer.dev.cmdBindPipeline(self.command_buffer, .graphics, renderer.rectangle_pipeline);
             renderer.dev.cmdBindVertexBuffers(self.command_buffer, 0, 1, @ptrCast(&instance_buffer.buffer), &offset);
-            renderer.dev.cmdDraw(self.command_buffer, quad_vertex_count, @intCast(instance_count), 0, 0);
-
-            self.flushed_rectangle_count = self.rectangle_count;
+            renderer.dev.cmdDraw(self.command_buffer, quad_vertex_count, @intCast(range.count), 0, 0);
         }
 
-        fn flushText(self: *Frame) void {
+        fn flushText(self: *Frame, range: DrawRange) void {
             const renderer = self.renderer;
-            const instance_count = self.text_instance_count - self.flushed_text_instance_count;
-            if (instance_count == 0) return;
+            if (range.count == 0) return;
 
-            const byte_offset = self.flushed_text_instance_count * @sizeOf(GlyphInstance);
+            const byte_offset = range.start * @sizeOf(GlyphInstance);
 
             renderer.dev.cmdBindPipeline(self.command_buffer, .graphics, renderer.text_pipeline);
             renderer.dev.cmdBindDescriptorSets(
@@ -359,9 +430,7 @@ pub const VulkanRenderer = struct {
             const offset = [_]vk.DeviceSize{@intCast(byte_offset)};
             const instance_buffer = &renderer.text_instance_buffer;
             renderer.dev.cmdBindVertexBuffers(self.command_buffer, 0, 1, @ptrCast(&instance_buffer.buffer), &offset);
-            renderer.dev.cmdDraw(self.command_buffer, quad_vertex_count, @intCast(instance_count), 0, 0);
-
-            self.flushed_text_instance_count = self.text_instance_count;
+            renderer.dev.cmdDraw(self.command_buffer, quad_vertex_count, @intCast(range.count), 0, 0);
         }
     };
 
@@ -429,6 +498,7 @@ pub const VulkanRenderer = struct {
             .{ .host_visible_bit = true, .host_coherent_bit = true },
             true,
         );
+        self.draw_commands = try allocator.alloc(DrawCommand, max_draw_commands_per_frame);
         self.bitmap_font_texture = try self.createBitmapFontTextureResources();
         self.text_descriptor_set = try self.createTextDescriptorSet();
 
@@ -444,6 +514,10 @@ pub const VulkanRenderer = struct {
         self.bitmap_font_texture.deinit(self);
         self.text_instance_buffer.deinit(self);
         self.rectangle_instance_buffer.deinit(self);
+        if (self.draw_commands) |draw_commands| {
+            self.allocator.free(draw_commands);
+            self.draw_commands = null;
+        }
 
         if (self.text_descriptor_pool != .null_handle) self.dev.destroyDescriptorPool(self.text_descriptor_pool, null);
         if (self.text_pipeline != .null_handle) self.dev.destroyPipeline(self.text_pipeline, null);
