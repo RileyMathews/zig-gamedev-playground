@@ -59,15 +59,15 @@ The renderer uses a small set of graphics concepts repeatedly. This guide keeps 
 Read these when you want a standalone explanation plus the exact code locations where the concept appears in this project:
 
 - [Framebuffer Pixels](graphics-concepts/framebuffer-pixels.md): the renderer's top-left pixel coordinate system and how shaders convert it to clip space.
-- [Swapchains](graphics-concepts/swapchains.md): the rotating set of presentable window images.
-- [Images, Image Views, And Framebuffers](graphics-concepts/images-image-views-and-framebuffers.md): the GPU image objects that receive pixels or hold textures.
-- [Render Passes](graphics-concepts/render-passes.md): how Vulkan describes attachment usage during a frame.
-- [Command Buffers](graphics-concepts/command-buffers.md): recorded GPU command lists used for frames and texture upload.
-- [Graphics Pipelines](graphics-concepts/graphics-pipelines.md): baked shader and fixed-function state for rectangles and text.
 - [Shaders](graphics-concepts/shaders.md): the GLSL programs that position quads and color pixels.
 - [Instance Data](graphics-concepts/instance-data.md): the per-rectangle and per-glyph records written by draw calls.
-- [Descriptor Sets](graphics-concepts/descriptor-sets.md): shader resource bindings used by text rendering for the font atlas.
+- [Graphics Pipelines](graphics-concepts/graphics-pipelines.md): baked shader and fixed-function state for rectangles and text.
+- [Command Buffers](graphics-concepts/command-buffers.md): recorded GPU command lists used for frames and texture upload.
+- [Render Passes](graphics-concepts/render-passes.md): how Vulkan describes attachment usage during a frame.
+- [Images, Image Views, And Framebuffers](graphics-concepts/images-image-views-and-framebuffers.md): the GPU image objects that receive pixels or hold textures.
+- [Swapchains](graphics-concepts/swapchains.md): the rotating set of presentable window images.
 - [Push Constants](graphics-concepts/push-constants.md): tiny per-frame values sent to shaders through the command buffer.
+- [Descriptor Sets](graphics-concepts/descriptor-sets.md): shader resource bindings used by text rendering for the font atlas.
 - [Synchronization](graphics-concepts/synchronization.md): semaphores, fences, and barriers that order GPU work.
 - [Vulkan Memory And Resources](graphics-concepts/vulkan-memory-and-resources.md): buffer/image allocation, mapped memory, and staging uploads.
 
